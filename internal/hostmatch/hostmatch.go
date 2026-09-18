@@ -58,8 +58,10 @@ func (m *Matcher) Matches(host string) bool {
 
 // MatchGlob matches a domain against a glob pattern.
 // "*" matches any host. "*.example.com" matches any subdomain depth and
-// "example.com" itself.
+// "example.com" itself. Matching is case-insensitive per RFC 4343.
 func MatchGlob(pattern, name string) bool {
+	pattern = strings.ToLower(pattern)
+	name = strings.ToLower(name)
 	if pattern == "*" {
 		return true
 	}
@@ -72,10 +74,11 @@ func MatchGlob(pattern, name string) bool {
 }
 
 // StripPort removes the port from a host:port string. If there's no port,
-// the host is returned unchanged.
+// the host is returned. IPv6 brackets (e.g. [::1]) are stripped for clean
+// IP parsing and domain matching.
 func StripPort(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
-		return h
+		return strings.Trim(h, "[]")
 	}
-	return host
+	return strings.Trim(host, "[]")
 }
