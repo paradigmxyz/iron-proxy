@@ -68,7 +68,13 @@ func (c *Cache) GetOrCreate(domain string) (*tls.Certificate, error) {
 	defer c.mu.Unlock()
 
 	if cert, ok := c.cache.Get(domain); ok {
-		return cert, nil
+		// The LRU expiry uses Go's monotonic clock, which does not advance while
+		// the host is suspended. Certificate validity uses wall time, so reject a
+		// cached leaf that has expired even when its LRU entry is still alive.
+		if cert.Leaf != nil && time.Now().Before(cert.Leaf.NotAfter) {
+			return cert, nil
+		}
+		c.cache.Remove(domain)
 	}
 
 	cert, err := c.generate(domain)

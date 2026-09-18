@@ -328,6 +328,22 @@ func TestGetOrCreate_CacheHit(t *testing.T) {
 	require.Equal(t, 1, c.Len())
 }
 
+func TestGetOrCreate_ExpiredLeaf(t *testing.T) {
+	caCert, caKey := generateTestCA(t)
+	c := newTestCache(t, caCert, caKey, 10)
+
+	cert1, err := c.GetOrCreate("example.com")
+	require.NoError(t, err)
+	cert1.Leaf.NotAfter = time.Now().Add(-time.Minute)
+
+	cert2, err := c.GetOrCreate("example.com")
+	require.NoError(t, err)
+
+	require.NotSame(t, cert1, cert2)
+	require.True(t, cert2.Leaf.NotAfter.After(time.Now()))
+	require.Equal(t, 1, c.Len())
+}
+
 func TestGetOrCreate_DifferentDomains(t *testing.T) {
 	caCert, caKey := generateTestCA(t)
 	c := newTestCache(t, caCert, caKey, 10)
