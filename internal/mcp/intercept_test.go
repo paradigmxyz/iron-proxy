@@ -280,33 +280,42 @@ func TestWrapResponseBodySSELeavesUnrelatedToolsArrayAlone(t *testing.T) {
 	require.Contains(t, string(out), "another_unknown")
 }
 
-// TestEvaluateRequestUppercaseContentType is a regression test for the bug
-// where Content-Type comparison was case-sensitive. Per RFC 7231, media
-// types are case-insensitive, so "Application/JSON" must trigger MCP
-// inspection just like "application/json".
-func TestEvaluateRequestUppercaseContentType(t *testing.T) {
+func TestEvaluateRequestEnforcesPostRegardlessOfContentType(t *testing.T) {
 	p := newTestPolicy(t)
-
 	body := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"delete_repo"}}`
-	u, _ := url.Parse("https://mcp.github.com/mcp")
-	req := &http.Request{
-		Method:        http.MethodPost,
-		Host:          "mcp.github.com",
-		URL:           u,
-		Header:        http.Header{"Content-Type": {"Application/JSON; charset=utf-8"}},
-		ContentLength: int64(len(body)),
-		Body:          transform.NewBufferedBody(io.NopCloser(strings.NewReader(body)), 0),
+
+	cases := []struct {
+		name        string
+		contentType string
+	}{
+		{name: "json", contentType: "application/json"},
+		{name: "json with casing and parameter", contentType: "Application/JSON; charset=utf-8"},
+		{name: "plain text", contentType: "text/plain"},
+		{name: "form", contentType: "application/x-www-form-urlencoded"},
+		{name: "missing"},
+		{name: "malformed", contentType: "application/json, text/plain"},
 	}
 
-	s := p.MatchServer(req)
-	require.NotNil(t, s)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := newJSONRequest(t, body)
+			if tc.contentType == "" {
+				req.Header.Del("Content-Type")
+			} else {
+				req.Header.Set("Content-Type", tc.contentType)
+			}
+			s := p.MatchServer(req)
+			require.NotNil(t, s)
 
-	tr := &Trace{Server: s.Name}
-	resp, err := p.EvaluateRequest(s, req, tr)
-	require.NoError(t, err)
-	require.NotNil(t, resp, "uppercase Content-Type must still trigger MCP enforcement")
-	require.Len(t, tr.Messages, 1)
-	require.Equal(t, DecisionDeny, tr.Messages[0].Decision)
+			tr := &Trace{Server: s.Name}
+			resp, err := p.EvaluateRequest(s, req, tr)
+			require.NoError(t, err)
+			require.NotNil(t, resp)
+			require.Len(t, tr.Messages, 1)
+			require.Equal(t, DecisionDeny, tr.Messages[0].Decision)
+			require.Equal(t, ReasonToolNotAllowed, tr.Messages[0].Reason)
+		})
+	}
 }
 
 func TestWrapResponseBodyOtherContentTypePassesThrough(t *testing.T) {
