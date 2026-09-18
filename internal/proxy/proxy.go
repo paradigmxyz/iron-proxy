@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
@@ -25,6 +26,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
+	"github.com/ironsh/iron-proxy/internal/proxystatus"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"golang.org/x/net/http2"
@@ -41,6 +43,8 @@ type Proxy struct {
 	tlsMode              string
 	tlsListener          net.Listener
 	tunnelAddr           string
+	proxyStatusName      string
+	proxyStatusVerbose   bool
 	tunnelListener       net.Listener
 	tunnelDone           chan struct{}
 	certCache            *certcache.Cache
@@ -72,13 +76,18 @@ type Options struct {
 	HTTPAddr   string
 	HTTPSAddr  string
 	TunnelAddr string
-	TLSMode    string
-	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
-	Pipeline   *transform.PipelineHolder
-	Resolver   *net.Resolver
-	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
-	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
-	MCPGateway *mcpgateway.Holder
+	// ProxyStatusName identifies this proxy in RFC 9209 Proxy-Status headers on
+	// proxy-generated responses; empty disables them. ProxyStatusVerbose adds
+	// the precise error type, details and next-hop (see config.Proxy).
+	ProxyStatusName    string
+	ProxyStatusVerbose bool
+	TLSMode            string
+	CertCache          *certcache.Cache // required when TLSMode == config.TLSModeMITM
+	Pipeline           *transform.PipelineHolder
+	Resolver           *net.Resolver
+	Guard              *dnsguard.Guard   // nil is treated as an empty (no-op) guard
+	MCPPolicy          *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
+	MCPGateway         *mcpgateway.Holder
 	// ResponseRetryHandler may add headers and replay the exact transformed
 	// request once after selected upstream response statuses.
 	ResponseRetryHandler *responseretry.Handler
@@ -115,6 +124,8 @@ func New(opts Options) *Proxy {
 		httpsAddr:            opts.HTTPSAddr,
 		tlsMode:              opts.TLSMode,
 		tunnelAddr:           opts.TunnelAddr,
+		proxyStatusName:      opts.ProxyStatusName,
+		proxyStatusVerbose:   opts.ProxyStatusVerbose,
 		tunnelDone:           make(chan struct{}),
 		certCache:            opts.CertCache,
 		pipeline:             opts.Pipeline,
@@ -387,12 +398,14 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		result.Action = transform.ActionContinue // error, not reject
 		result.StatusCode = http.StatusBadGateway
 		result.Err = err
+		p.annotateUpstreamError(w.Header(), r.Host, err)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
 	if rejectResp != nil {
 		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
 		result.StatusCode = rejectResp.StatusCode
+		p.annotateReject(rejectResp, r.Host)
 		p.writeResponse(w, rejectResp)
 		return
 	}
@@ -422,6 +435,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 			if rejectResp != nil {
 				result.Action = transform.ActionReject
 				result.StatusCode = rejectResp.StatusCode
+				p.annotateReject(rejectResp, r.Host)
 				p.writeResponse(w, rejectResp)
 				return
 			}
@@ -488,6 +502,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
 		result.Err = err
+		p.annotateUpstreamError(w.Header(), r.Host, err)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -531,6 +546,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
 		result.Err = err
+		p.annotateUpstreamError(w.Header(), r.Host, err)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -579,6 +595,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 				result.Action = transform.ActionContinue
 				result.StatusCode = http.StatusBadGateway
 				result.Err = err
+				p.annotateUpstreamError(w.Header(), r.Host, err)
 				http.Error(w, "bad gateway", http.StatusBadGateway)
 				return
 			}
@@ -607,6 +624,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
 		result.Err = err
+		p.annotateUpstreamError(w.Header(), r.Host, err)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -787,6 +805,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 			slog.String("host", host),
 			slog.String("error", err.Error()),
 		)
+		p.annotateUpstreamError(w.Header(), host, err)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -803,6 +822,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 	if writeErr := r.Write(upstreamConn); writeErr != nil {
 		p.logger.Error("websocket upstream write failed", slog.String("error", writeErr.Error()))
 		upstreamConn.Close()
+		p.annotateUpstreamError(w.Header(), host, writeErr)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -893,6 +913,87 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 			break
 		}
 	}
+}
+
+// annotateReject adds a Proxy-Status to a response a transform generated in
+// place of forwarding. 4xx is a verdict on the request (http_request_denied);
+// 5xx means something the proxy depends on failed (proxy_internal_error), so
+// the client should retry rather than treat the request as denied.
+func (p *Proxy) annotateReject(resp *http.Response, host string) {
+	if p.proxyStatusName == "" || resp == nil {
+		return
+	}
+	if resp.Header == nil {
+		resp.Header = http.Header{}
+	}
+	errType := proxystatus.ErrHTTPRequestDenied
+	if resp.StatusCode >= 500 {
+		errType = proxystatus.ErrProxyInternalError
+	}
+	item := proxystatus.Item{Proxy: p.proxyStatusName, Error: errType}
+	if p.proxyStatusVerbose {
+		item.NextHop = host
+	}
+	proxystatus.Append(resp.Header, item)
+}
+
+// annotateUpstreamError adds a Proxy-Status for an upstream failure to headers
+// that have not been written yet. Non-verbose output is a uniform
+// destination_unavailable so a denied CIDR, an unresolvable name and a refused
+// port are indistinguishable to the client; the cause is on the audit line.
+func (p *Proxy) annotateUpstreamError(h http.Header, host string, err error) {
+	if p.proxyStatusName == "" || h == nil {
+		return
+	}
+	item := proxystatus.Item{
+		Proxy: p.proxyStatusName,
+		Error: proxystatus.ErrDestinationUnavailable,
+	}
+	if p.proxyStatusVerbose {
+		errType, details := classifyUpstreamError(err)
+		item.Error = errType
+		item.Details = details
+		item.NextHop = host
+	}
+	proxystatus.Append(h, item)
+}
+
+// classifyUpstreamError maps a dial/transport error to an RFC 9209 error type
+// for verbose Proxy-Status output. Only the deny-CIDR case carries details: the
+// operator configured that refusal and the address came from the request.
+func classifyUpstreamError(err error) (errType, details string) {
+	if err == nil {
+		return proxystatus.ErrProxyInternalError, ""
+	}
+	if dnsguard.IsDenyError(err) {
+		return proxystatus.ErrDestinationIPProhibited, err.Error()
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsTimeout {
+			return proxystatus.ErrDNSTimeout, ""
+		}
+		return proxystatus.ErrDNSError, ""
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return proxystatus.ErrConnectionTimeout, ""
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return proxystatus.ErrConnectionRefused, ""
+	}
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return proxystatus.ErrConnectionTerminated, ""
+	}
+
+	var tlsErr *tls.CertificateVerificationError
+	if errors.As(err, &tlsErr) {
+		return proxystatus.ErrTLSCertificateError, ""
+	}
+
+	return proxystatus.ErrDestinationUnavailable, ""
 }
 
 func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {

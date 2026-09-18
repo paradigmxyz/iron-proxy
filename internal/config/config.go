@@ -111,6 +111,15 @@ type Proxy struct {
 	// at connect time against the resolved address. When unset, a secure
 	// default (IMDS + loopback) is applied; set to an empty list to disable.
 	UpstreamDenyCIDRs CIDRList `yaml:"upstream_deny_cidrs"`
+	// ProxyStatusName identifies this proxy in the RFC 9209 Proxy-Status header
+	// on responses it generates itself (transform rejections, upstream
+	// failures). Empty (the default) disables the header.
+	ProxyStatusName string `yaml:"proxy_status_name"`
+	// ProxyStatusVerbose reports the precise error type, details and next-hop
+	// instead of a uniform destination_unavailable. Off by default: for a
+	// filtering proxy the error type tells a client which ranges are denied,
+	// which names resolve and which ports answer.
+	ProxyStatusVerbose bool `yaml:"proxy_status_verbose"`
 	// UpstreamProxy routes iron-proxy's own outbound connections through an
 	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
 	// NO_PROXY environment variables override these fields when set.

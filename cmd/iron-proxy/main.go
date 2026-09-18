@@ -233,6 +233,8 @@ func main() {
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
 		HTTPSAddr:                     cfg.Proxy.HTTPSListen,
 		TunnelAddr:                    cfg.Proxy.TunnelListen,
+		ProxyStatusName:               cfg.Proxy.ProxyStatusName,
+		ProxyStatusVerbose:            cfg.Proxy.ProxyStatusVerbose,
 		TLSMode:                       cfg.TLS.Mode,
 		CertCache:                     certCache,
 		Pipeline:                      holder,

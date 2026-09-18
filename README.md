@@ -311,6 +311,37 @@ configured authorize and complete endpoints; ordinary proxied traffic remains
 subject to the full upstream deny list. Public, loopback, link-local, and cloud
 metadata ranges cannot be added through this setting.
 
+### Proxy-Status
+
+Set `proxy.proxy_status_name` to have the proxy add an
+[RFC 9209](https://www.rfc-editor.org/rfc/rfc9209) `Proxy-Status` header to
+responses it generates itself — transform rejections (HTTP and CONNECT) and
+upstream failures — so a client can tell a policy refusal or an unreachable
+destination apart from the origin returning the same status code. Successfully
+proxied responses are never touched.
+
+```yaml
+proxy:
+  proxy_status_name: "egress" # header is off when unset
+  proxy_status_verbose: false # default
+```
+
+By default the header carries only the proxy's name and a coarse error class:
+`http_request_denied` for a 4xx rejection, `proxy_internal_error` for a 5xx one,
+and `destination_unavailable` for any upstream failure:
+
+```
+Proxy-Status: egress; error=http_request_denied
+```
+
+Upstream failures are deliberately uniform: for a filtering proxy, telling a
+denied CIDR apart from an unresolvable name or a refused port lets a client map
+the network it was fenced out of (RFC 9209 §4). The precise cause is always on
+the audit line. `proxy_status_verbose: true` puts it in the header too
+(`destination_ip_prohibited`, `dns_error`, `connection_refused`,
+`tls_certificate_error`, …) along with `details` and `next-hop`; enable it only
+where clients are as trusted as the operator.
+
 ### Allowlist
 
 Default-deny. Requests must match at least one domain glob or CIDR to proceed.

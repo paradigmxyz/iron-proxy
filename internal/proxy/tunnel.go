@@ -107,6 +107,7 @@ func (p *Proxy) handleTunnelCONNECT(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
 		}
+		p.annotateReject(rejectResp, host)
 		p.writeResponse(w, rejectResp)
 		return
 	}
