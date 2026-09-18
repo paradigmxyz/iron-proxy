@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -34,6 +36,7 @@ type grpcConfig struct {
 	SendRequestBody  bool                   `yaml:"send_request_body"`
 	SendResponseBody bool                   `yaml:"send_response_body"`
 	Rules            []hostmatch.RuleConfig `yaml:"rules"`
+	AllowedHeaders   []string               `yaml:"allowed_headers"` // headers sent to the server; empty = all
 }
 
 type tlsConfig struct {
@@ -49,8 +52,40 @@ type GRPCTransform struct {
 	sendRequestBody  bool
 	sendResponseBody bool
 	rules            []hostmatch.Rule
+	allowedHeaders   []headerMatcher // nil = forward every header
 	conn             *grpc.ClientConn
 	client           transformv1.TransformServiceClient
+}
+
+// headerMatcher matches one allowed_headers entry: a literal canonical header
+// name, or a /.../ pattern compiled as a case-insensitive regexp (the same
+// syntax as the header_allowlist transform).
+type headerMatcher struct {
+	name string
+	re   *regexp.Regexp
+}
+
+func (m headerMatcher) matches(canonical string) bool {
+	if m.re != nil {
+		return m.re.MatchString(canonical)
+	}
+	return m.name == canonical
+}
+
+func parseHeaderMatchers(name string, patterns []string) ([]headerMatcher, error) {
+	matchers := make([]headerMatcher, 0, len(patterns))
+	for _, p := range patterns {
+		if len(p) >= 2 && strings.HasPrefix(p, "/") && strings.HasSuffix(p, "/") {
+			re, err := regexp.Compile("(?i)" + p[1:len(p)-1])
+			if err != nil {
+				return nil, fmt.Errorf("grpc transform %q: invalid allowed_headers regex %q: %w", name, p, err)
+			}
+			matchers = append(matchers, headerMatcher{re: re})
+			continue
+		}
+		matchers = append(matchers, headerMatcher{name: http.CanonicalHeaderKey(p)})
+	}
+	return matchers, nil
 }
 
 func factory(cfg yaml.Node, _ *slog.Logger) (transform.Transformer, error) {
@@ -117,11 +152,18 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 		return nil, fmt.Errorf("grpc transform %q: %w", cfg.Name, err)
 	}
 
+	allowed, err := parseHeaderMatchers(cfg.Name, cfg.AllowedHeaders)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+
 	return &GRPCTransform{
 		name:             cfg.Name,
 		sendRequestBody:  cfg.SendRequestBody,
 		sendResponseBody: cfg.SendResponseBody,
 		rules:            rules,
+		allowedHeaders:   allowed,
 		conn:             conn,
 		client:           transformv1.NewTransformServiceClient(conn),
 	}, nil
@@ -134,7 +176,7 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
-	pbReq, err := httpRequestToProto(req, g.sendRequestBody)
+	pbReq, err := httpRequestToProto(req, g.sendRequestBody, g.allowedHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: marshaling request: %w", g.name, err)
 	}
@@ -171,11 +213,11 @@ func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.T
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
-	pbReq, err := httpRequestToProto(req, g.sendRequestBody)
+	pbReq, err := httpRequestToProto(req, g.sendRequestBody, g.allowedHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: marshaling request: %w", g.name, err)
 	}
-	pbResp, err := httpResponseToProto(resp, g.sendResponseBody)
+	pbResp, err := httpResponseToProto(resp, g.sendResponseBody, g.allowedHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: marshaling response: %w", g.name, err)
 	}
@@ -266,13 +308,13 @@ func annotationsToStruct(annotations map[string]any) *structpb.Struct {
 	return &structpb.Struct{Fields: fields}
 }
 
-func httpRequestToProto(req *http.Request, sendBody bool) (*transformv1.HttpRequest, error) {
+func httpRequestToProto(req *http.Request, sendBody bool, allowed []headerMatcher) (*transformv1.HttpRequest, error) {
 	pb := &transformv1.HttpRequest{
 		Method:     req.Method,
 		Url:        req.URL.String(),
 		Host:       req.Host,
 		RemoteAddr: req.RemoteAddr,
-		Headers:    headersToProto(req.Header),
+		Headers:    headersToProto(req.Header, allowed),
 	}
 
 	if sendBody && req.Body != nil {
@@ -286,10 +328,10 @@ func httpRequestToProto(req *http.Request, sendBody bool) (*transformv1.HttpRequ
 	return pb, nil
 }
 
-func httpResponseToProto(resp *http.Response, sendBody bool) (*transformv1.HttpResponse, error) {
+func httpResponseToProto(resp *http.Response, sendBody bool, allowed []headerMatcher) (*transformv1.HttpResponse, error) {
 	pb := &transformv1.HttpResponse{
 		StatusCode: int32(resp.StatusCode),
-		Headers:    headersToProto(resp.Header),
+		Headers:    headersToProto(resp.Header, allowed),
 	}
 
 	if sendBody && resp.Body != nil {
@@ -358,15 +400,30 @@ func applyModifiedResponse(pb *transformv1.HttpResponse, resp *http.Response) {
 	}
 }
 
-func headersToProto(h http.Header) map[string]*transformv1.HeaderValues {
-	if len(h) == 0 {
-		return nil
-	}
+// headersToProto converts h, keeping only headers matched by allowed when it
+// is non-empty. Filtering applies to the proto alone; h itself is untouched.
+func headersToProto(h http.Header, allowed []headerMatcher) map[string]*transformv1.HeaderValues {
 	out := make(map[string]*transformv1.HeaderValues, len(h))
 	for k, vs := range h {
+		if len(allowed) > 0 && !headerAllowed(allowed, k) {
+			continue
+		}
 		out[k] = &transformv1.HeaderValues{Values: vs}
 	}
+	if len(out) == 0 {
+		return nil
+	}
 	return out
+}
+
+func headerAllowed(allowed []headerMatcher, name string) bool {
+	canonical := http.CanonicalHeaderKey(name)
+	for _, m := range allowed {
+		if m.matches(canonical) {
+			return true
+		}
+	}
+	return false
 }
 
 func protoToHeaders(h map[string]*transformv1.HeaderValues) http.Header {
