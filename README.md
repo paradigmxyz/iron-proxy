@@ -78,6 +78,12 @@ Or build from source:
 go build -o iron-proxy ./cmd/iron-proxy
 ```
 
+To build a Linux/amd64 image directly from source:
+
+```bash
+docker build -f Dockerfile.build -t iron-proxy .
+```
+
 ## Quick start
 
 ```bash
@@ -324,6 +330,82 @@ actually enforcing it. Requests that would be rejected are allowed through but
 annotated with `"action": "warn"` in the transform trace. This is useful for
 rolling out new allowlist rules or auditing existing traffic before switching
 to enforcement.
+
+### Exact request policies
+
+`request_policy` restricts an exact host and port by path, HTTP method, query
+parameters, and optional empty body. Unmatched endpoints on that host/port
+are rejected; other destinations pass through, so retain `allowlist` as the
+overall egress gate.
+
+```yaml
+transforms:
+  - name: request_policy
+    config:
+      rules:
+        - host: "api.example.com"
+          port: "443"
+          path: "/v1/item"
+          http_methods: ["GET", "HEAD"]
+          require_empty_body: true
+          query:
+            mode: exact
+            parameters:
+              - {name: id, required: true, value_pattern: "[0-9]+"}
+              - {name: format, required: true, exact_values: [json]}
+```
+
+Use `query: {mode: empty}` to disallow query values. In `exact` mode, unknown
+parameters are rejected. Each parameter requires either `exact_values` (the
+complete expected list, including multiplicity, regardless of order) or
+`value_pattern` (a whole-value RE2 match against exactly one decoded value).
+`case_insensitive: true` applies to exact values; regex flags belong inside
+the pattern. Parameters may be omitted unless `required: true` is set.
+
+### JSON-RPC method policies
+
+`json_rpc` allows specific JSON-RPC 2.0 methods at an exact endpoint,
+independently of MCP tool policy. Configure one rule per host/port; the first
+matching host/port rule applies. Other destinations pass through.
+
+```yaml
+transforms:
+  - name: json_rpc
+    config:
+      max_body_bytes: 1048576
+      rules:
+        - host: "rpc.example.com"
+          port: "443"
+          path: "/rpc"
+          http_methods: ["POST"]
+          allowed_methods: ["getStatus", "getItem"]
+```
+
+Every entry in a nonempty batch must pass. Requests require an ID and
+`application/json` content type (optional UTF-8 charset). Notifications,
+duplicate JSON keys, unknown envelope fields, incomplete/oversized bodies,
+content/transfer encoding, and WebSocket upgrades are rejected. RPC parameters
+must be an array or object; their contents are not restricted.
+
+Both transforms reject unknown YAML fields. CONNECT establishes transport;
+the inner HTTP request is evaluated separately. Place `request_policy` before
+`secrets` to constrain placeholder values and `json_rpc` after `secrets` when
+its path must match the rewritten upstream path.
+
+### Ports, private upstreams, and timeouts
+
+Shared host/method/path rules accept `ports: ["443"]`; omitting ports retains
+all-port matching. Implicit HTTP/HTTPS ports resolve to 80/443.
+
+`proxy.upstream_private_exceptions` maps exact hostnames to `/32` or `/128`
+addresses, for example `managed-rpc.internal: ["10.20.0.7/32"]`. The named
+host may resolve to those addresses despite `upstream_deny_cidrs`; IP-literal
+destinations cannot use exceptions. Transform policies still apply.
+
+Downstream defaults are 10 seconds for headers/tunnel handshakes and 30 seconds
+for request reads/idle connections. Upstream response timeouts are unchanged.
+The Go `proxy.Options` timeout fields accept positive overrides; zero/negative
+values retain these defaults.
 
 ### Annotate
 

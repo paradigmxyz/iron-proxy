@@ -114,7 +114,7 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	if port == "" {
 		port = defaultSNIUpstream
 	}
-	upstream, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(sni, port))
+	upstream, err := p.guard.DialContext(ctx, dialer, "tcp", net.JoinHostPort(sni, port))
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway

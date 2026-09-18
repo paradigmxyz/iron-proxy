@@ -42,8 +42,10 @@ import (
 	_ "github.com/ironsh/iron-proxy/internal/transform/grpc"
 	_ "github.com/ironsh/iron-proxy/internal/transform/headerallowlist"
 	_ "github.com/ironsh/iron-proxy/internal/transform/hmacsign"
+	_ "github.com/ironsh/iron-proxy/internal/transform/jsonrpc"
 	_ "github.com/ironsh/iron-proxy/internal/transform/judge"
 	_ "github.com/ironsh/iron-proxy/internal/transform/oauth"
+	_ "github.com/ironsh/iron-proxy/internal/transform/requestpolicy"
 	_ "github.com/ironsh/iron-proxy/internal/transform/secrets"
 )
 
@@ -203,7 +205,10 @@ func main() {
 
 	// Build the upstream-dial deny guard. config.Validate has already
 	// confirmed the entries parse, so this should not fail.
-	guard, err := dnsguard.New(cfg.Proxy.UpstreamDenyCIDRs.Values)
+	guard, err := dnsguard.NewWithExceptions(
+		cfg.Proxy.UpstreamDenyCIDRs.Values,
+		cfg.Proxy.UpstreamPrivateExceptions,
+	)
 	if err != nil {
 		logger.Error("initializing upstream deny guard", slog.String("error", err.Error()))
 		os.Exit(1)
