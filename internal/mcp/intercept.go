@@ -47,13 +47,12 @@ func (p *Policy) EvaluateRequest(server *Server, req *http.Request, trace *Trace
 		return nil, nil
 	}
 
-	// We only inspect application/json POST requests. GET listeners and other
-	// shapes pass through; their responses are still wrapped if they arrive
-	// over text/event-stream so the listener stream is filtered.
+	// Streamable HTTP sends JSON-RPC messages via POST. Inspect every POST
+	// regardless of its declared media type so clients cannot bypass policy by
+	// omitting or falsifying Content-Type. GET listeners and other shapes pass
+	// through; their responses are still wrapped if they arrive over
+	// text/event-stream so the listener stream is filtered.
 	if req.Method != http.MethodPost {
-		return nil, nil
-	}
-	if !mediaTypeIs(req.Header.Get("Content-Type"), mediaTypeJSON) {
 		return nil, nil
 	}
 
