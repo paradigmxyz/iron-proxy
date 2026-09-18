@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -135,14 +136,14 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 	result.StatusCode = http.StatusOK
 
 	// Proxy bidirectionally until either side closes or the proxy shuts down.
-	proxyBidi(p.shutdownCtx, clientConn, upstream, p.logger)
+	proxyBidi(p.shutdownCtx, clientConn, upstream, p.logger, "sni passthrough")
 	return nil
 }
 
 // proxyBidi copies bytes between two connections in both directions. When
 // either direction ends (EOF, error, or ctx cancellation), both connections
-// are closed so the other direction unblocks.
-func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
+// are closed so the other direction unblocks. label names the relay in logs.
+func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger, label string) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -152,22 +153,28 @@ func proxyBidi(ctx context.Context, a, b net.Conn, logger *slog.Logger) {
 		_ = b.Close()
 	}()
 
+	// The direction that loses the race sees ErrClosed when the winner closes
+	// its conn; that is the normal teardown, not a copy failure.
+	logCopyErr := func(dir string, err error) {
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			logger.Debug(label+" "+dir+" copy error", slog.String("error", err.Error()))
+		}
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		if _, err := io.Copy(b, a); err != nil {
-			logger.Debug("sni passthrough a->b copy error", slog.String("error", err.Error()))
-		}
+		_, err := io.Copy(b, a)
+		logCopyErr("a->b", err)
 		cancel()
 	}()
 
 	go func() {
 		defer wg.Done()
-		if _, err := io.Copy(a, b); err != nil {
-			logger.Debug("sni passthrough b->a copy error", slog.String("error", err.Error()))
-		}
+		_, err := io.Copy(a, b)
+		logCopyErr("b->a", err)
 		cancel()
 	}()
 

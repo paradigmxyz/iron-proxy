@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
@@ -822,35 +821,10 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 		return
 	}
 
-	// Proxy bidirectionally
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		if _, err := io.Copy(upstreamConn, clientBuf); err != nil {
-			p.logger.Debug("websocket client->upstream copy error", slog.String("error", err.Error()))
-		}
-		// Signal upstream we're done writing
-		if tc, ok := upstreamConn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-	}()
-
-	go func() {
-		defer wg.Done()
-		if _, err := io.Copy(clientConn, upstreamConn); err != nil {
-			p.logger.Debug("websocket upstream->client copy error", slog.String("error", err.Error()))
-		}
-		// Signal client we're done writing
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
-	}()
-
-	wg.Wait()
-	clientConn.Close()
-	upstreamConn.Close()
+	// Relay until either side closes or the proxy shuts down. The hijacked
+	// bufio.Reader may hold bytes already read from the client, so wrap the
+	// conn to drain it first.
+	proxyBidi(p.shutdownCtx, newPeekedConn(clientConn, clientBuf.Reader), upstreamConn, p.logger, "websocket")
 
 	p.logger.Debug("websocket connection closed", slog.String("host", host))
 }
