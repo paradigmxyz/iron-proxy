@@ -213,7 +213,7 @@ Transforms run in order. Built-in transforms:
 | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `allowlist`    | Permits requests to matching domains/CIDRs; rejects everything else (403).                                              |
 | `secrets`      | Scans headers (and optionally query, path, or body) for proxy tokens and swaps in real secrets from environment variables. |
-| `body_capture` | Records decoded request bodies of matching hosts as `request_body` audit fields. Observation-only; never rejects.       |
+| `body_capture` | Records decoded request bodies of matching hosts as `request_body` audit fields, and optionally response bodies as `response_body`. Observation-only.        |
 
 ## Configuration
 
@@ -412,19 +412,44 @@ On a successful capture, the transform's entry in `request_transforms` is
 annotated with `captured_bytes` and `truncated` so the trace records that a
 body was captured without duplicating the body itself.
 
-Response bodies are not captured. Streaming responses (SSE) would have to be
-buffered end-to-end before forwarding, which would stall the client.
+#### Response bodies
 
-> **Warning:** Captured bodies are written to the audit log in plain text. When
-> `secrets` runs with `match_body: true`, place `body_capture` *before* `secrets`
-> so the audit log records the sandbox's proxy tokens rather than the real
-> credentials `secrets` swaps into the body.
+Response capture is **off by default**. Set `capture_response_body: true` to
+turn it on; `response_body` and `response_body_truncated` then join the same
+`body_capture` group, and `max_response_body_bytes` caps the copy (default
+64 KiB).
+
+The response half is *tee'd*, never buffered-then-forwarded. Installing the tee
+is O(1) and never reads the body; the client's own reads drive the copy, so a
+streaming reply (SSE from an LLM provider, say) is forwarded byte-for-byte as it
+arrives and the audit copy simply holds whatever went past by the time the audit
+record is emitted — which is after the body has been written to the client.
+Bytes past `max_response_body_bytes` are *dropped* as they stream by rather than
+queued, so a full audit buffer can never apply back-pressure to the client, and
+a failing sink can never surface as a read error on the client's stream.
+
+What lands in `response_body` is the raw reply as it went over the wire, only
+content-decoded when the upstream compressed it (`gzip`, `deflate`; a reply in
+an encoding the transform cannot decode is skipped and the gap is annotated on
+the trace). SSE frames are not merged and JSON is not parsed — that is the log
+consumer's job, and guessing at a provider's streaming shape does not belong on
+the hot path.
+
+> **Warning:** Captured bodies are written to the audit log in plain text, and
+> that goes for captured response bodies too — enable `capture_response_body`
+> only where an upstream's replies are safe to keep. When `secrets` runs with
+> `match_body: true`, place `body_capture` *before* `secrets` so the audit log
+> records the sandbox's proxy tokens rather than the real credentials `secrets`
+> swaps into the body.
 
 ```yaml
 transforms:
   - name: body_capture
     config:
       max_request_body_bytes: 16384
+      # Optional; off by default.
+      capture_response_body: true
+      max_response_body_bytes: 65536
       rules:
         - host: "api.anthropic.com"
           methods: ["POST"]

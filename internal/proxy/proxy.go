@@ -600,6 +600,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 
 	// Run response transforms
 	finalResp, err := pl.ProcessResponse(r.Context(), tctx, r, resp, &result.ResponseTransforms)
+	// The response leg can create the body_capture side channel too — a matching
+	// request with no body of its own leaves it nil above, but its response is
+	// still worth capturing. Nil-guarded so the request-leg capture (already
+	// copied, and the one holding request_body) is never clobbered. What the
+	// response leg installed is a tee, so the bytes it carries are filled in as
+	// the body streams below and are only complete by the time the deferred
+	// finish() emits the audit record.
+	if result.BodyCapture == nil {
+		result.BodyCapture = tctx.BodyCapture
+	}
 	if err != nil {
 		if markIfClientCancel(r, err, result) {
 			return
