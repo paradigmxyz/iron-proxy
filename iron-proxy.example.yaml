@@ -699,8 +699,10 @@ transforms:
 # inside CTEs, subqueries, function arguments, etc.:
 #  - SET ROLE / RESET ROLE / SET SESSION AUTHORIZATION / RESET SESSION
 #    AUTHORIZATION — direct GUC mutation.
-#  - SELECT set_config('role', ...), SELECT pg_catalog.set_config(...) and
-#    the same for 'session_authorization' — function-call bypasses.
+#  - All calls to set_config, including schema-qualified and parameterized
+#    forms. Dynamic targets cannot be proven safe when the query is parsed.
+#  - The legacy wire-level FunctionCall protocol, which invokes functions by
+#    OID without carrying SQL text the proxy can inspect.
 #  - DO $$ ... $$ blocks — the plpgsql body is opaque to the SQL parser, so
 #    we reject rather than risk an embedded role change.
 #  - Multi-statement Simple Queries — kept as a single-statement guard.
@@ -744,11 +746,12 @@ transforms:
 #       # client issues runs as this role on the upstream database.
 #       role: tenant_role
 #       # Optional session variables (GUCs) the proxy SETs at session start,
-#       # before the SET ROLE. The proxy also pins these: a client may not SET,
-#       # RESET, or set_config them afterwards (nor RESET ALL / DISCARD ALL), so
-#       # a setting used as a security boundary (e.g. an RLS key) can't be
-#       # overridden. Names must be bare or dotted GUC identifiers; role and
-#       # session_authorization are reserved (use role above).
+#       # before the SET ROLE. The proxy also pins these: a client may not SET
+#       # or RESET them afterwards (nor RESET ALL / DISCARD ALL), so a setting
+#       # used as a security boundary (e.g. an RLS key) can't be overridden.
+#       # All set_config calls are blocked. Names must be bare or dotted GUC
+#       # identifiers; role and session_authorization are reserved (use role
+#       # above).
 #       settings:
 #         - name: app.tenant_id
 #           value: centaur
