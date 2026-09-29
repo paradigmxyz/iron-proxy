@@ -6,8 +6,8 @@ import (
 	// The wasilibs package is a pure-Go (wazero-based) drop-in for pg_query_go's
 	// Parse function, sparing us from a CGO build dependency. AST node types
 	// still come from the pganalyze package; wasilibs re-uses them.
-	pgparse "github.com/wasilibs/go-pgquery"
 	pg_query "github.com/pganalyze/pg_query_go/v6"
+	pgparse "github.com/wasilibs/go-pgquery"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -49,8 +49,7 @@ const (
 	// OpOther is any statement not matched by a more specific case.
 	OpOther OpKind = iota
 	// OpSetRole is `SET ROLE <ident>` or anything anywhere in the AST that
-	// changes the `role` GUC — including SET LOCAL, SET SESSION,
-	// and function-call bypasses like `set_config('role', ...)`.
+	// changes the `role` GUC through SET, including SET LOCAL and SET SESSION.
 	OpSetRole
 	// OpSetSessionAuthorization is the equivalent for `session_authorization`.
 	OpSetSessionAuthorization
@@ -69,18 +68,15 @@ const (
 	// upstream so Postgres produces the canonical syntax error; the proxy
 	// doesn't try to second-guess.
 	OpParseError
+	// OpSetConfig is any call to set_config, regardless of schema qualification
+	// or whether its target setting is a string literal. Dynamic targets cannot
+	// be proven safe at Parse time, so the policy rejects the function wholesale.
+	OpSetConfig
 )
 
 // GUC names whose mutation we treat as a role change for policy purposes.
 // Case-insensitive comparison; Postgres treats GUC names case-insensitively.
 var roleGUCs = map[string]OpKind{
-	"role":                  OpSetRole,
-	"session_authorization": OpSetSessionAuthorization,
-}
-
-// dangerous set_config / current_setting target GUCs. We don't reject reads
-// (current_setting), only writes (set_config).
-var roleGUCsForSetConfig = map[string]OpKind{
 	"role":                  OpSetRole,
 	"session_authorization": OpSetSessionAuthorization,
 }
@@ -204,10 +200,12 @@ func scanMutations(node *pg_query.Node) mutations {
 		case *pg_query.VariableShowStmt:
 			// SHOW is read-only; ignore.
 		case *pg_query.FuncCall:
-			if name, kind := setConfigTarget(n); name != "" {
-				m.setGUCs = append(m.setGUCs, name)
-				if kind != 0 && m.kind == 0 {
-					m.kind = kind
+			if name, ok := setConfigTarget(n); ok {
+				if name != "" {
+					m.setGUCs = append(m.setGUCs, name)
+				}
+				if m.kind == 0 {
+					m.kind = OpSetConfig
 				}
 			}
 		}
@@ -233,46 +231,42 @@ func roleKindFor(name string, kind pg_query.VariableSetKind) OpKind {
 	return base
 }
 
-// setConfigTarget inspects fc and, when it is a call to set_config (or
-// pg_catalog.set_config) whose first argument is a string-literal GUC name,
-// returns that lowercased name and the role-policy OpKind for it (0 when the
-// target is not role-affecting). Returns ("", 0) when fc is not such a call.
-func setConfigTarget(fc *pg_query.FuncCall) (name string, kind OpKind) {
+// setConfigTarget inspects fc and reports whether it is a call to set_config,
+// including schema-qualified forms. When the first argument is a string
+// literal, name is its lowercased value; dynamic targets return an empty name
+// with ok=true so the policy can still reject the call.
+func setConfigTarget(fc *pg_query.FuncCall) (name string, ok bool) {
 	names := fc.GetFuncname()
 	if len(names) == 0 {
-		return "", 0
+		return "", false
 	}
 	// Funcname is a list of String nodes: ["set_config"] for unqualified
 	// or ["pg_catalog", "set_config"] for schema-qualified. We accept any
 	// schema qualifier and trust that user-defined set_config functions
 	// are also suspicious — better a rare false positive than a bypass.
 	last := names[len(names)-1]
-	lastStr, ok := last.Node.(*pg_query.Node_String_)
-	if !ok {
-		return "", 0
+	lastStr, isString := last.Node.(*pg_query.Node_String_)
+	if !isString {
+		return "", false
 	}
 	if !strings.EqualFold(lastStr.String_.GetSval(), "set_config") {
-		return "", 0
+		return "", false
 	}
 	args := fc.GetArgs()
 	if len(args) < 1 {
-		return "", 0
+		return "", true
 	}
-	param, ok := stringConst(args[0])
-	if !ok {
-		return "", 0
+	param, isConst := stringConst(args[0])
+	if !isConst {
+		return "", true
 	}
-	lower := strings.ToLower(param)
-	// roleGUCsForSetConfig returns the zero OpKind (0) for non-role names, which
-	// is exactly the "not role-affecting" signal callers expect.
-	return lower, roleGUCsForSetConfig[lower]
+	return strings.ToLower(param), true
 }
 
 // stringConst returns the string value of node if it's an A_Const with a
 // string value, else ("", false). set_config's first argument is the GUC
-// name; we only flag calls where it's a literal we can read at parse time.
-// `set_config(my_var, ...)` where my_var is a variable evaluates at run
-// time and is invisible to us — accepted limitation.
+// name. Literal targets are retained for mutation metadata; non-literal
+// targets are still classified as OpSetConfig and rejected by policy.
 func stringConst(node *pg_query.Node) (string, bool) {
 	if node == nil {
 		return "", false

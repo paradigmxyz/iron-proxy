@@ -17,12 +17,13 @@
 // While the relay is running the proxy is mostly transparent. It rejects
 // client-issued role-changing statements (`SET ROLE`, `RESET ROLE`,
 // `SET SESSION AUTHORIZATION`, `RESET SESSION AUTHORIZATION`) and their
-// function-call equivalents (`set_config('role', ...)`); any `SET`, `RESET`, or
-// `set_config` of a setting the upstream pins; the reset-everything statements
+// function-call equivalents; all calls to `set_config`; any `SET` or `RESET`
+// of a setting the upstream pins; the reset-everything statements
 // `RESET ALL` and `DISCARD ALL` (which would clear the managed role and pinned
-// settings); and DO blocks. Multi-statement Simple Queries are allowed as long
-// as every statement passes; a batch is rejected if any statement is rejected.
-// Extended Query, COPY, and prepared statements pass through unchanged.
+// settings); DO blocks; and the legacy wire-level FunctionCall protocol.
+// Multi-statement Simple Queries are allowed as long as every statement passes;
+// a batch is rejected if any statement is rejected. Extended Query, COPY, and
+// prepared statements pass through unchanged.
 //
 // The proxy runs a single postgres listener fronting multiple upstream
 // databases: the top-level postgres: block is one object with a listen address

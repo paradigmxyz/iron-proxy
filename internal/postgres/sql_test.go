@@ -52,30 +52,31 @@ func TestClassify(t *testing.T) {
 		{name: "multi select then select allowed", sql: "SELECT 1; SELECT 2", want: OpOther},
 		{name: "multi benign then set role", sql: "SELECT 1; SET ROLE tenant", want: OpSetRole},
 		{name: "multi benign then do block", sql: "SELECT 1; DO $$ BEGIN END $$", want: OpDoBlock},
-		{name: "multi benign then set_config role", sql: "SELECT 1; SELECT set_config('role', 'admin', false)", want: OpSetRole},
+		{name: "multi benign then set_config role", sql: "SELECT 1; SELECT set_config('role', 'admin', false)", want: OpSetConfig},
 		{name: "multi non-role sets allowed", sql: "SET search_path = public; SELECT 1", want: OpOther},
 		// Trailing semicolon alone is *not* multi (pg_query collapses it).
 		{name: "trailing semicolon not multi", sql: "SET ROLE tenant;", want: OpSetRole},
 
 		// set_config function-call bypass attempts
-		{name: "set_config role top level", sql: "SELECT set_config('role', 'admin', false)", want: OpSetRole},
-		{name: "set_config role local flag", sql: "SELECT set_config('role', 'admin', true)", want: OpSetRole},
-		{name: "pg_catalog set_config role", sql: "SELECT pg_catalog.set_config('role', 'admin', false)", want: OpSetRole},
-		{name: "set_config session_authorization", sql: "SELECT set_config('session_authorization', 'admin', false)", want: OpSetSessionAuthorization},
-		{name: "set_config case insensitive name", sql: "SELECT set_config('ROLE', 'admin', false)", want: OpSetRole},
-		{name: "set_config nested in select", sql: "SELECT 1, set_config('role', 'admin', false), 2", want: OpSetRole},
-		{name: "set_config in subquery", sql: "SELECT * FROM (SELECT set_config('role', 'admin', false)) s", want: OpSetRole},
-		{name: "set_config in cte", sql: "WITH x AS (SELECT set_config('role', 'admin', false)) SELECT * FROM x", want: OpSetRole},
-		{name: "set_config in where clause", sql: "SELECT 1 WHERE set_config('role', 'admin', false) = 'admin'", want: OpSetRole},
-		{name: "set_config inside insert", sql: "INSERT INTO t SELECT set_config('role', 'admin', false)", want: OpSetRole},
-
-		// set_config for safe parameters — allowed.
-		{name: "set_config search_path allowed", sql: "SELECT set_config('search_path', 'public', false)", want: OpOther},
+		{name: "set_config role top level", sql: "SELECT set_config('role', 'admin', false)", want: OpSetConfig},
+		{name: "set_config role local flag", sql: "SELECT set_config('role', 'admin', true)", want: OpSetConfig},
+		{name: "pg_catalog set_config role", sql: "SELECT pg_catalog.set_config('role', 'admin', false)", want: OpSetConfig},
+		{name: "set_config session_authorization", sql: "SELECT set_config('session_authorization', 'admin', false)", want: OpSetConfig},
+		{name: "set_config case insensitive name", sql: "SELECT set_config('ROLE', 'admin', false)", want: OpSetConfig},
+		{name: "set_config nested in select", sql: "SELECT 1, set_config('role', 'admin', false), 2", want: OpSetConfig},
+		{name: "set_config in subquery", sql: "SELECT * FROM (SELECT set_config('role', 'admin', false)) s", want: OpSetConfig},
+		{name: "set_config in cte", sql: "WITH x AS (SELECT set_config('role', 'admin', false)) SELECT * FROM x", want: OpSetConfig},
+		{name: "set_config in where clause", sql: "SELECT 1 WHERE set_config('role', 'admin', false) = 'admin'", want: OpSetConfig},
+		{name: "set_config inside insert", sql: "INSERT INTO t SELECT set_config('role', 'admin', false)", want: OpSetConfig},
+		{name: "set_config non-role setting", sql: "SELECT set_config('search_path', 'public', false)", want: OpSetConfig},
+		{name: "set_config parameter target", sql: "SELECT set_config($1, $2, false)", want: OpSetConfig},
+		{name: "set_config cast target", sql: "SELECT set_config('role'::text, 'admin', false)", want: OpSetConfig},
+		{name: "set_config computed target", sql: "SELECT set_config(concat('ro', 'le'), 'admin', false)", want: OpSetConfig},
 		{name: "current_setting role is read only", sql: "SELECT current_setting('role')", want: OpOther},
 
 		// PREPARE wrapping a SELECT that calls set_config — caught by the
 		// walker through the nested SelectStmt.
-		{name: "prepare wrapping set_config caught", sql: "PREPARE p AS SELECT set_config('role', 'admin', false)", want: OpSetRole},
+		{name: "prepare wrapping set_config caught", sql: "PREPARE p AS SELECT set_config('role', 'admin', false)", want: OpSetConfig},
 
 		// DO blocks — rejected regardless of contents.
 		{name: "do block empty", sql: "DO $$ BEGIN END $$", want: OpDoBlock},

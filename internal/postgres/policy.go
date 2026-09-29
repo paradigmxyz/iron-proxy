@@ -14,10 +14,9 @@ const (
 	// The plpgsql body is opaque to our SQL-level AST walker; rejecting
 	// avoids the risk of an embedded role change.
 	RejectDoBlock
-	// RejectPinnedSetting — the client tried to SET / RESET / set_config a
-	// session variable the upstream pins. The proxy sets these at session start
-	// and forbids overrides so a setting used as a security boundary can't be
-	// changed.
+	// RejectPinnedSetting — the client tried to SET or RESET a session variable
+	// the upstream pins. The proxy sets these at session start and forbids
+	// overrides so a setting used as a security boundary can't be changed.
 	RejectPinnedSetting
 	// RejectResetAll — the client tried RESET ALL, which would reset the
 	// proxy-managed role and every pinned setting.
@@ -25,6 +24,12 @@ const (
 	// RejectDiscardAll — the client tried DISCARD ALL, which (like RESET ALL)
 	// resets the proxy-managed role and every pinned setting.
 	RejectDiscardAll
+	// RejectSetConfig — the client called set_config. Dynamic targets cannot be
+	// inspected safely, so all calls are rejected regardless of the GUC name.
+	RejectSetConfig
+	// RejectFunctionCall — the client used the legacy wire-level FunctionCall
+	// protocol, which invokes a function by OID without inspectable SQL text.
+	RejectFunctionCall
 )
 
 // ClassifyClientStatement inspects sql and returns whether the relay should
@@ -32,9 +37,9 @@ const (
 // the lowercased set of setting names this upstream forbids the client from
 // mutating; pass nil when the upstream pins nothing.
 //
-// Beyond the role policy, the proxy rejects any SET / RESET / set_config of a
-// pinned setting, and any RESET ALL / DISCARD ALL (which would reset the
-// managed role and every pinned setting at once).
+// Beyond the role policy, the proxy rejects every set_config call, any SET or
+// RESET of a pinned setting, and any RESET ALL / DISCARD ALL (which would reset
+// the managed role and every pinned setting at once).
 //
 // Multi-statement Simple Queries are allowed when every statement passes;
 // Classify aggregates the batch, so a single offending statement anywhere
@@ -47,6 +52,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 	switch op.Kind {
 	case OpSetRole, OpSetSessionAuthorization, OpResetRole, OpResetSessionAuthorization:
 		return false, RejectClientRoleChange
+	case OpSetConfig:
+		return false, RejectSetConfig
 	case OpDoBlock:
 		// DO blocks contain opaque plpgsql we can't introspect from the SQL
 		// AST. Rather than risk an embedded role change slipping through,

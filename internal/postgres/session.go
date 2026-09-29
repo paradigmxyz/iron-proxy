@@ -267,9 +267,8 @@ func completeClientHandshake(backend *pgproto3.Backend, hj *pgconn.HijackedConn)
 // relay drives the bidirectional message pump between client and upstream
 // after the role has been set on the upstream session.
 //
-// Two goroutines do socket I/O: c2s reads client messages and rejects
-// role-changing statements (and DO blocks) before forwarding everything else;
-// s2c is a pure passthrough.
+// Two goroutines do socket I/O: c2s reads client messages and applies the
+// statement and protocol policy before forwarding; s2c is a pure passthrough.
 //
 // Writes to the client serialize through clientWriteMu since both goroutines
 // may write — c2s when synthesizing a reject, s2c when forwarding the normal
@@ -285,6 +284,10 @@ type relay struct {
 	logger   *slog.Logger
 
 	clientWriteMu sync.Mutex
+	// txStatus is the last ReadyForQuery status received from upstream. It is
+	// protected by clientWriteMu so synthetic ReadyForQuery messages preserve
+	// the upstream transaction state.
+	txStatus byte
 
 	// skipExtended, when true, drops client Bind/Describe/Execute/Close
 	// messages until a Sync is observed. Set when a Parse is rejected: per the
@@ -304,6 +307,7 @@ func newRelay(clientConn, upstreamConn net.Conn, backend *pgproto3.Backend, fron
 		frontend:     frontend,
 		upstream:     upstream,
 		logger:       logger,
+		txStatus:     'I',
 	}
 }
 
@@ -327,8 +331,8 @@ func (r *relay) run() {
 	<-done
 }
 
-// clientToServer reads frontend messages from the client and forwards them
-// upstream, rejecting only role-changing statements and DO blocks.
+// clientToServer reads frontend messages from the client and forwards those
+// permitted by the statement and protocol policy upstream.
 func (r *relay) clientToServer() {
 	for {
 		msg, err := r.backend.Receive()
@@ -370,13 +374,23 @@ func (r *relay) clientToServer() {
 				return
 			}
 
+		case *pgproto3.FunctionCall:
+			if r.skipExtended {
+				continue
+			}
+			// FunctionCall invokes a function by OID without carrying SQL text,
+			// so the proxy cannot apply its statement policy. The protocol is a
+			// legacy fast path; reject it rather than forwarding an opaque call.
+			r.writeReject(RejectFunctionCall, true)
+			continue
+
 		case *pgproto3.Sync:
 			if r.skipExtended {
 				// We rejected an earlier Parse in this extended-query batch.
 				// Synthesize a ReadyForQuery for the client and consume the
 				// Sync without forwarding upstream.
 				r.skipExtended = false
-				r.writeClient(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+				r.writeReadyForQuery()
 				continue
 			}
 			r.frontend.Send(m)
@@ -406,8 +420,17 @@ func (r *relay) writeReject(reason RejectReason, withReadyForQuery bool) {
 
 	r.backend.Send(rejectError(reason))
 	if withReadyForQuery {
-		r.backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		r.backend.Send(&pgproto3.ReadyForQuery{TxStatus: r.txStatus})
 	}
+	_ = r.backend.Flush()
+}
+
+// writeReadyForQuery writes a synthetic ReadyForQuery carrying the most recent
+// transaction status observed from upstream.
+func (r *relay) writeReadyForQuery() {
+	r.clientWriteMu.Lock()
+	defer r.clientWriteMu.Unlock()
+	r.backend.Send(&pgproto3.ReadyForQuery{TxStatus: r.txStatus})
 	_ = r.backend.Flush()
 }
 
@@ -417,6 +440,9 @@ func (r *relay) writeClient(msgs ...pgproto3.BackendMessage) {
 	r.clientWriteMu.Lock()
 	defer r.clientWriteMu.Unlock()
 	for _, m := range msgs {
+		if ready, ok := m.(*pgproto3.ReadyForQuery); ok {
+			r.txStatus = ready.TxStatus
+		}
 		r.backend.Send(m)
 	}
 	_ = r.backend.Flush()
@@ -435,7 +461,7 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 		return &pgproto3.ErrorResponse{
 			Severity: "ERROR",
 			Code:     "42501",
-			Message:  "blocked by iron-proxy policy: this session setting is managed by the proxy; clients may not SET / RESET / set_config it",
+			Message:  "blocked by iron-proxy policy: this session setting is managed by the proxy; clients may not SET or RESET it",
 		}
 	case RejectResetAll:
 		return &pgproto3.ErrorResponse{
@@ -449,13 +475,25 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 			Code:     "42501",
 			Message:  "blocked by iron-proxy policy: DISCARD ALL would reset the proxy-managed role and session settings",
 		}
+	case RejectSetConfig:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "42501",
+			Message:  "blocked by iron-proxy policy: set_config is not supported because session settings are managed by the proxy",
+		}
+	case RejectFunctionCall:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "0A000",
+			Message:  "blocked by iron-proxy policy: the legacy FunctionCall protocol is not supported",
+		}
 	case RejectClientRoleChange:
 		fallthrough
 	default:
 		return &pgproto3.ErrorResponse{
 			Severity: "ERROR",
 			Code:     "42501",
-			Message:  "blocked by iron-proxy policy: role is managed by the proxy; clients may not issue SET ROLE / SET SESSION AUTHORIZATION / RESET ROLE / set_config('role',...) / set_config('session_authorization',...)",
+			Message:  "blocked by iron-proxy policy: role is managed by the proxy; clients may not issue SET ROLE / SET SESSION AUTHORIZATION / RESET ROLE",
 		}
 	}
 }

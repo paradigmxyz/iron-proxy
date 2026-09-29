@@ -307,13 +307,31 @@ func TestPostgresPolicy(t *testing.T) {
 		require.Equal(t, pgRole, role)
 	})
 
-	t.Run("set_config for other gucs passes through", func(t *testing.T) {
-		// Only role-mutating GUCs trigger the rejection; set_config for benign
-		// parameters should pass through.
-		conn := dial(t, pgClientPassword)
-		results, err := conn.Exec(context.Background(), "SELECT set_config('application_name', 'iron-test', false)").ReadAll()
+	t.Run("parameterized set_config target is rejected", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn, err := pgx.Connect(ctx, connStr(pgClientPassword))
 		require.NoError(t, err)
-		require.Len(t, results, 1)
+		t.Cleanup(func() { require.NoError(t, conn.Close(context.Background())) })
+
+		_, err = conn.Exec(ctx, "SELECT set_config($1, $2, false)", "role", "other_role")
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		require.Contains(t, pgErr.Message, "set_config is not supported")
+
+		var role string
+		require.NoError(t, conn.QueryRow(ctx, "SELECT current_role").Scan(&role))
+		require.Equal(t, pgRole, role)
+	})
+
+	t.Run("set_config for other gucs is rejected", func(t *testing.T) {
+		conn := dial(t, pgClientPassword)
+		_, err := conn.Exec(context.Background(), "SELECT set_config('application_name', 'iron-test', false)").ReadAll()
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		require.Contains(t, pgErr.Message, "set_config is not supported")
 	})
 
 	t.Run("session setting is injected at session start", func(t *testing.T) {

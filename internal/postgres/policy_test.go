@@ -54,7 +54,7 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set pinned rejected", sql: "SET centaur.slack_channel_id = 'C999'", pinned: pinned, reason: RejectPinnedSetting},
 		{name: "set local pinned rejected", sql: "SET LOCAL centaur.slack_channel_id = 'C999'", pinned: pinned, reason: RejectPinnedSetting},
 		{name: "reset pinned rejected", sql: "RESET centaur.slack_channel_id", pinned: pinned, reason: RejectPinnedSetting},
-		{name: "set_config pinned rejected", sql: "SELECT set_config('centaur.slack_channel_id', 'C999', false)", pinned: pinned, reason: RejectPinnedSetting},
+		{name: "set_config pinned rejected", sql: "SELECT set_config('centaur.slack_channel_id', 'C999', false)", pinned: pinned, reason: RejectSetConfig},
 		{name: "set pinned buried in batch rejected", sql: "SELECT 1; SET centaur.slack_channel_id = 'C999'", pinned: pinned, reason: RejectPinnedSetting},
 		{name: "reset all rejected even with pin", sql: "RESET ALL", pinned: pinned, reason: RejectResetAll},
 		// Reading a pinned setting is fine; only writes are blocked.
@@ -65,12 +65,14 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set formerly-pinned allowed without pin", sql: "SET centaur.slack_channel_id = 'C999'", allowed: true},
 
 		// Function-call bypass attempts — caught by AST walker.
-		{name: "set_config role rejected", sql: "SELECT set_config('role', 'admin', false)", reason: RejectClientRoleChange},
-		{name: "pg_catalog set_config role rejected", sql: "SELECT pg_catalog.set_config('role', 'admin', false)", reason: RejectClientRoleChange},
-		{name: "set_config session_authorization rejected", sql: "SELECT set_config('session_authorization', 'admin', false)", reason: RejectClientRoleChange},
-		{name: "set_config role in cte rejected", sql: "WITH x AS (SELECT set_config('role', 'admin', false)) SELECT * FROM x", reason: RejectClientRoleChange},
+		{name: "set_config role rejected", sql: "SELECT set_config('role', 'admin', false)", reason: RejectSetConfig},
+		{name: "pg_catalog set_config role rejected", sql: "SELECT pg_catalog.set_config('role', 'admin', false)", reason: RejectSetConfig},
+		{name: "set_config session_authorization rejected", sql: "SELECT set_config('session_authorization', 'admin', false)", reason: RejectSetConfig},
+		{name: "set_config role in cte rejected", sql: "WITH x AS (SELECT set_config('role', 'admin', false)) SELECT * FROM x", reason: RejectSetConfig},
+		{name: "set_config non-role setting rejected", sql: "SELECT set_config('search_path', 'public', false)", reason: RejectSetConfig},
+		{name: "set_config parameter target rejected", sql: "SELECT set_config($1, $2, false)", reason: RejectSetConfig},
+		{name: "set_config cast target rejected", sql: "SELECT set_config('role'::text, 'admin', false)", reason: RejectSetConfig},
 		{name: "current_setting role allowed", sql: "SELECT current_setting('role')", allowed: true},
-		{name: "set_config search_path allowed", sql: "SELECT set_config('search_path', 'public', false)", allowed: true},
 
 		// DO blocks rejected outright.
 		{name: "do block rejected", sql: "DO $$ BEGIN END $$", reason: RejectDoBlock},
