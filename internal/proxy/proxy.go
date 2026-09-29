@@ -628,9 +628,8 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		}
 	}
 
-	// SSE: stream with flushing
-	if isSSE(finalResp) {
-		p.streamSSE(w, finalResp)
+	if isStreamingResponse(finalResp) {
+		p.streamResponse(w, finalResp)
 		return
 	}
 
@@ -855,15 +854,19 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 	p.logger.Debug("websocket connection closed", slog.String("host", host))
 }
 
-// isSSE detects a Server-Sent Events response.
-func isSSE(resp *http.Response) bool {
-	ct := resp.Header.Get("Content-Type")
-	return strings.HasPrefix(ct, "text/event-stream")
+// isStreamingResponse detects response protocols that require incremental
+// delivery to the client.
+func isStreamingResponse(resp *http.Response) bool {
+	ct := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Type")))
+	return strings.HasPrefix(ct, "text/event-stream") ||
+		strings.HasPrefix(ct, "application/connect+") ||
+		strings.HasPrefix(ct, "application/grpc")
 }
 
-// streamSSE writes an SSE response with per-chunk flushing.
-func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
+// streamResponse writes a streaming response with per-chunk flushing.
+func (p *Proxy) streamResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
+	defer writeTrailers(w, resp)
 	w.WriteHeader(resp.StatusCode)
 
 	reader := transform.RequireBufferedBody(resp.Body).StreamingReader()
@@ -871,24 +874,25 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(w, reader); err != nil {
-			p.logger.Warn("SSE copy error", slog.String("error", err.Error()))
+			p.logger.Warn("streaming response copy error", slog.String("error", err.Error()))
 		}
 		return
 	}
+	flusher.Flush()
 
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := reader.Read(buf)
 		if n > 0 {
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				p.logger.Warn("SSE write error", slog.String("error", writeErr.Error()))
+				p.logger.Warn("streaming response write error", slog.String("error", writeErr.Error()))
 				break
 			}
 			flusher.Flush()
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
-				p.logger.Warn("SSE read error", slog.String("error", readErr.Error()))
+				p.logger.Warn("streaming response read error", slog.String("error", readErr.Error()))
 			}
 			break
 		}
