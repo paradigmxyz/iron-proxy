@@ -498,6 +498,12 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 			Code:     "0A000",
 			Message:  "blocked by iron-proxy policy: the legacy FunctionCall protocol is not supported",
 		}
+	case RejectUninspectableRoutine:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "0A000",
+			Message:  "blocked by iron-proxy policy: function and procedure definitions must use inspectable SQL or PL/pgSQL without dynamic SQL",
+		}
 	case RejectClientRoleChange:
 		fallthrough
 	default:

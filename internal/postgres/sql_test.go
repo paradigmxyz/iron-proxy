@@ -82,6 +82,89 @@ func TestClassify(t *testing.T) {
 		{name: "do block empty", sql: "DO $$ BEGIN END $$", want: OpDoBlock},
 		{name: "do block with set role", sql: "DO $$ BEGIN EXECUTE 'SET ROLE admin'; END $$", want: OpDoBlock},
 
+		// SQL function and procedure bodies are parsed recursively. Other
+		// languages remain opaque and are rejected fail-closed.
+		{
+			name: "benign sql function",
+			sql:  "CREATE FUNCTION f() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
+			want: OpOther,
+		},
+		{
+			name: "sql function calls set_config",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SELECT set_config('centaur.slack_user', 'U999', false) $$",
+			want: OpSetConfig,
+		},
+		{
+			name: "sql function changes role",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SET ROLE none; SELECT current_role::text $$",
+			want: OpSetRole,
+		},
+		{
+			name: "sql procedure resets all",
+			sql:  "CREATE PROCEDURE p() LANGUAGE sql AS $$ RESET ALL $$",
+			want: OpOther,
+		},
+		{
+			name: "sql standard body calls set_config",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE sql RETURN set_config('centaur.slack_user', 'U999', false)",
+			want: OpSetConfig,
+		},
+		{
+			name: "sql function delegates to existing function",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SELECT existing_wrapper() $$",
+			want: OpOther,
+		},
+		{
+			name: "benign plpgsql function",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN 'ok'; END $$",
+			want: OpOther,
+		},
+		{
+			name: "plpgsql return calls set_config",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN set_config('centaur.slack_user', 'U999', false); END $$",
+			want: OpSetConfig,
+		},
+		{
+			name: "plpgsql assignment calls set_config",
+			sql:  "CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ DECLARE x text; BEGIN x := set_config('centaur.slack_user', 'U999', false); RETURN x; END $$",
+			want: OpSetConfig,
+		},
+		{
+			name: "plpgsql perform calls set_config",
+			sql:  "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM set_config('centaur.slack_user', 'U999', false); END $$",
+			want: OpSetConfig,
+		},
+		{
+			name: "plpgsql procedure sets pinned guc",
+			sql:  "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN SET centaur.slack_user = 'U999'; END $$",
+			want: OpOther,
+		},
+		{
+			name: "plpgsql dynamic execute is uninspectable",
+			sql:  "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'SET centaur.slack_user = ''U999'''; END $$",
+			want: OpUninspectableRoutine,
+		},
+		{
+			name: "plpgsql dynamic cursor is uninspectable",
+			sql:  "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ DECLARE c refcursor; BEGIN OPEN c FOR EXECUTE 'SELECT 1'; END $$",
+			want: OpUninspectableRoutine,
+		},
+		{
+			name: "plpgsql routine after another statement uses its own source",
+			sql:  "SELECT 1; CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN set_config('centaur.slack_user', 'U999', false); END $$",
+			want: OpSetConfig,
+		},
+		{
+			name: "native function is uninspectable",
+			sql:  "CREATE FUNCTION f(integer) RETURNS integer AS 'module', 'symbol' LANGUAGE C STRICT",
+			want: OpUninspectableRoutine,
+		},
+		{
+			name: "invalid sql body is uninspectable",
+			sql:  "CREATE FUNCTION f() RETURNS integer LANGUAGE sql AS $$ this is not sql $$",
+			want: OpUninspectableRoutine,
+		},
+
 		// Parse errors — forwarded.
 		{name: "syntax error", sql: "INSERT FROM WHERE", want: OpParseError},
 	}
@@ -115,6 +198,21 @@ func TestClassifyMutationFacts(t *testing.T) {
 		{name: "reset all flagged", sql: "RESET ALL", resetAll: true},
 		{name: "discard all flagged", sql: "DISCARD ALL", discard: true},
 		{name: "discard plans not flagged", sql: "DISCARD PLANS"},
+		{
+			name:     "sql procedure body reset all",
+			sql:      "CREATE PROCEDURE p() LANGUAGE sql AS $$ RESET ALL $$",
+			resetAll: true,
+		},
+		{
+			name:    "sql function set clause collected",
+			sql:     "CREATE FUNCTION f() RETURNS integer LANGUAGE sql SET centaur.slack_user = 'U999' AS $$ SELECT 1 $$",
+			setGUCs: []string{"centaur.slack_user"},
+		},
+		{
+			name:    "plpgsql procedure body set collected",
+			sql:     "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN SET centaur.slack_user = 'U999'; END $$",
+			setGUCs: []string{"centaur.slack_user"},
+		},
 		{name: "select writes nothing", sql: "SELECT 1"},
 		{name: "current_setting writes nothing", sql: "SELECT current_setting('centaur.slack_channel_id')"},
 	}

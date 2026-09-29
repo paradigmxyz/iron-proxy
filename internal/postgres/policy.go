@@ -30,6 +30,9 @@ const (
 	// RejectFunctionCall — the client used the legacy wire-level FunctionCall
 	// protocol, which invokes a function by OID without inspectable SQL text.
 	RejectFunctionCall
+	// RejectUninspectableRoutine — the client tried to define a function or
+	// procedure whose body cannot be inspected safely.
+	RejectUninspectableRoutine
 )
 
 // ClassifyClientStatement inspects sql and returns whether the relay should
@@ -59,6 +62,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		// AST. Rather than risk an embedded role change slipping through,
 		// we reject them outright.
 		return false, RejectDoBlock
+	case OpUninspectableRoutine:
+		return false, RejectUninspectableRoutine
 	}
 	// RESET ALL / DISCARD ALL reset the proxy-managed role regardless of which
 	// settings the upstream pins, so they are always rejected.

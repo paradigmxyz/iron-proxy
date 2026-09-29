@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"encoding/json"
 	"strings"
 
 	// The wasilibs package is a pure-Go (wazero-based) drop-in for pg_query_go's
@@ -72,6 +73,10 @@ const (
 	// or whether its target setting is a string literal. Dynamic targets cannot
 	// be proven safe at Parse time, so the policy rejects the function wholesale.
 	OpSetConfig
+	// OpUninspectableRoutine is a CREATE FUNCTION / CREATE PROCEDURE statement
+	// whose body cannot be inspected. Dynamic PL/pgSQL and unsupported languages
+	// can hide role or GUC changes, so the policy rejects their definitions.
+	OpUninspectableRoutine
 )
 
 // GUC names whose mutation we treat as a role change for policy purposes.
@@ -131,7 +136,7 @@ func classifyUncached(sql string) Op {
 		if root == nil {
 			continue
 		}
-		m := classifyStmt(root)
+		m := classifyStmt(root, rawStatementSQL(sql, s))
 		if op.Kind == OpOther {
 			op.Kind = m.kind
 		}
@@ -153,9 +158,9 @@ type mutations struct {
 }
 
 // classifyStmt classifies a single statement's root node.
-func classifyStmt(root *pg_query.Node) mutations {
+func classifyStmt(root *pg_query.Node, statementSQL string) mutations {
 	// Top-level shape gives us a fast path for the common DDL/DML cases.
-	switch root.Node.(type) {
+	switch n := root.Node.(type) {
 	case *pg_query.Node_TransactionStmt:
 		// BEGIN / COMMIT / ROLLBACK / SAVEPOINT etc. — no GUC mutation.
 		return mutations{kind: OpOther}
@@ -163,8 +168,207 @@ func classifyStmt(root *pg_query.Node) mutations {
 		// The plpgsql body is opaque to the SQL AST walker; we can't see GUC
 		// writes inside it, so the statement is rejected wholesale via Kind.
 		return mutations{kind: OpDoBlock}
+	case *pg_query.Node_CreateFunctionStmt:
+		return classifyRoutineDefinition(root, n.CreateFunctionStmt, statementSQL)
 	}
 	return scanMutations(root)
+}
+
+func rawStatementSQL(sql string, stmt *pg_query.RawStmt) string {
+	start := int(stmt.GetStmtLocation())
+	if start < 0 || start > len(sql) {
+		return sql
+	}
+	end := len(sql)
+	if stmt.GetStmtLen() > 0 {
+		end = start + int(stmt.GetStmtLen())
+		if end > len(sql) {
+			return sql
+		}
+	}
+	return sql[start:end]
+}
+
+// classifyRoutineDefinition inspects CREATE FUNCTION and CREATE PROCEDURE
+// bodies submitted by clients. SQL-standard bodies are already represented as
+// AST nodes under SqlBody. String-form LANGUAGE sql bodies need a second parse.
+// Other languages are rejected because their bodies are opaque to the SQL AST.
+func classifyRoutineDefinition(root *pg_query.Node, stmt *pg_query.CreateFunctionStmt, statementSQL string) mutations {
+	m := scanMutations(root)
+	if m.kind != OpOther {
+		return m
+	}
+
+	language, ok := routineStringOption(stmt.GetOptions(), "language")
+	if !ok {
+		m.kind = OpUninspectableRoutine
+		return m
+	}
+	if strings.EqualFold(language, "plpgsql") {
+		return mergeMutations(m, classifyPLpgSQL(statementSQL))
+	}
+	if !strings.EqualFold(language, "sql") {
+		m.kind = OpUninspectableRoutine
+		return m
+	}
+
+	if stmt.GetSqlBody() != nil {
+		return m
+	}
+
+	body, ok := routineStringOption(stmt.GetOptions(), "as")
+	if !ok {
+		m.kind = OpUninspectableRoutine
+		return m
+	}
+	bodyOp := Classify(body)
+	if bodyOp.Kind == OpParseError || bodyOp.Kind == OpEmpty {
+		m.kind = OpUninspectableRoutine
+		return m
+	}
+	return mergeMutations(m, mutationsFromOp(bodyOp))
+}
+
+// classifyPLpgSQL parses a PL/pgSQL definition, recursively classifies every
+// static SQL statement and expression, and rejects dynamic execution. Dynamic
+// SQL cannot be resolved at Parse time, even when its current text is a literal.
+func classifyPLpgSQL(statementSQL string) mutations {
+	parsed, err := pgparse.ParsePlPgSqlToJSON(statementSQL)
+	if err != nil {
+		return mutations{kind: OpUninspectableRoutine}
+	}
+	var tree any
+	if err := json.Unmarshal([]byte(parsed), &tree); err != nil {
+		return mutations{kind: OpUninspectableRoutine}
+	}
+	m := mutations{kind: OpOther}
+	if !scanPLpgSQL(tree, &m) {
+		m.kind = OpUninspectableRoutine
+	}
+	return m
+}
+
+func scanPLpgSQL(value any, m *mutations) bool {
+	switch value := value.(type) {
+	case []any:
+		for _, item := range value {
+			if !scanPLpgSQL(item, m) {
+				return false
+			}
+		}
+	case map[string]any:
+		for key, item := range value {
+			switch key {
+			case "PLpgSQL_stmt_dynexecute", "PLpgSQL_stmt_dynfors", "dynquery":
+				return false
+			case "PLpgSQL_expr":
+				expr, ok := item.(map[string]any)
+				if !ok {
+					return false
+				}
+				op, ok := classifyPLpgSQLExpression(expr)
+				if !ok {
+					return false
+				}
+				*m = mergeMutations(*m, mutationsFromOp(op))
+			default:
+				if !scanPLpgSQL(item, m) {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+func classifyPLpgSQLExpression(expr map[string]any) (Op, bool) {
+	query, ok := expr["query"].(string)
+	if !ok || strings.TrimSpace(query) == "" {
+		return Op{}, false
+	}
+	parseMode, ok := expr["parseMode"].(float64)
+	if !ok {
+		parseMode = 0
+	}
+
+	switch {
+	case parseMode == 0:
+		// A complete SQL statement such as SELECT, PERFORM's synthesized
+		// SELECT, CALL, or SET.
+	case parseMode == 2:
+		query = "SELECT " + query
+	case parseMode >= 3:
+		_, rhs, ok := strings.Cut(query, ":=")
+		if !ok || strings.TrimSpace(rhs) == "" {
+			return Op{}, false
+		}
+		query = "SELECT " + rhs
+	default:
+		// Type-name parse modes cannot execute SQL or mutate a setting.
+		return Op{Kind: OpOther}, true
+	}
+
+	op := Classify(query)
+	if op.Kind == OpParseError || op.Kind == OpEmpty {
+		return Op{}, false
+	}
+	return op, true
+}
+
+// routineStringOption returns a single string value from a CREATE FUNCTION /
+// CREATE PROCEDURE option. LANGUAGE stores a String directly; AS stores its
+// body in a one-item List. Native functions use two AS strings and are not
+// considered inspectable.
+func routineStringOption(options []*pg_query.Node, name string) (string, bool) {
+	for _, option := range options {
+		defNode, ok := option.Node.(*pg_query.Node_DefElem)
+		if !ok || !strings.EqualFold(defNode.DefElem.GetDefname(), name) {
+			continue
+		}
+		if value, ok := nodeString(defNode.DefElem.GetArg()); ok {
+			return value, true
+		}
+		arg := defNode.DefElem.GetArg()
+		if arg == nil {
+			return "", false
+		}
+		listNode, ok := arg.Node.(*pg_query.Node_List)
+		if !ok || len(listNode.List.GetItems()) != 1 {
+			return "", false
+		}
+		return nodeString(listNode.List.GetItems()[0])
+	}
+	return "", false
+}
+
+func nodeString(node *pg_query.Node) (string, bool) {
+	if node == nil {
+		return "", false
+	}
+	strNode, ok := node.Node.(*pg_query.Node_String_)
+	if !ok {
+		return "", false
+	}
+	return strNode.String_.GetSval(), true
+}
+
+func mutationsFromOp(op Op) mutations {
+	return mutations{
+		kind:     op.Kind,
+		setGUCs:  op.SetGUCs,
+		resetAll: op.ResetAll,
+		discard:  op.Discard,
+	}
+}
+
+func mergeMutations(dst, src mutations) mutations {
+	if dst.kind == OpOther {
+		dst.kind = src.kind
+	}
+	dst.setGUCs = append(dst.setGUCs, src.setGUCs...)
+	dst.resetAll = dst.resetAll || src.resetAll
+	dst.discard = dst.discard || src.discard
+	return dst
 }
 
 // scanMutations walks the AST rooted at node and reports every GUC-affecting

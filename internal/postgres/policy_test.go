@@ -9,7 +9,10 @@ import (
 func TestClassifyClientStatement(t *testing.T) {
 	// pinned models an upstream that pins one custom setting; nil means an
 	// upstream that pins nothing beyond the always-on role policy.
-	pinned := map[string]struct{}{"centaur.slack_channel_id": {}}
+	pinned := map[string]struct{}{
+		"centaur.slack_channel_id": {},
+		"centaur.slack_user":       {},
+	}
 
 	tests := []struct {
 		name    string
@@ -63,6 +66,59 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set unpinned allowed", sql: "SET centaur.other = 'x'", pinned: pinned, allowed: true},
 		// Without a pin, the same SET is allowed.
 		{name: "set formerly-pinned allowed without pin", sql: "SET centaur.slack_channel_id = 'C999'", allowed: true},
+
+		// Inspectable SQL-language routine bodies are checked recursively. Calls
+		// to routines already installed by the database remain the operator's
+		// responsibility; definitions in opaque languages are rejected.
+		{
+			name:    "benign sql function allowed",
+			sql:     "CREATE FUNCTION f() RETURNS integer LANGUAGE sql AS $$ SELECT 1 $$",
+			allowed: true,
+		},
+		{
+			name:   "sql function cannot change pinned guc",
+			sql:    "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SELECT set_config('centaur.slack_user', 'U999', false) $$",
+			pinned: pinned,
+			reason: RejectSetConfig,
+		},
+		{
+			name:   "sql function set clause cannot change pinned guc",
+			sql:    "CREATE FUNCTION f() RETURNS integer LANGUAGE sql SET centaur.slack_user = 'U999' AS $$ SELECT 1 $$",
+			pinned: pinned,
+			reason: RejectPinnedSetting,
+		},
+		{
+			name:   "sql procedure cannot reset settings",
+			sql:    "CREATE PROCEDURE p() LANGUAGE sql AS $$ RESET ALL $$",
+			reason: RejectResetAll,
+		},
+		{
+			name:    "benign plpgsql function allowed",
+			sql:     "CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN 'ok'; END $$",
+			allowed: true,
+		},
+		{
+			name:   "plpgsql function cannot change pinned guc",
+			sql:    "CREATE FUNCTION f() RETURNS text LANGUAGE plpgsql AS $$ BEGIN RETURN set_config('centaur.slack_user', 'U999', false); END $$",
+			pinned: pinned,
+			reason: RejectSetConfig,
+		},
+		{
+			name:   "plpgsql procedure cannot set pinned guc",
+			sql:    "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN SET centaur.slack_user = 'U999'; END $$",
+			pinned: pinned,
+			reason: RejectPinnedSetting,
+		},
+		{
+			name:   "plpgsql dynamic sql rejected",
+			sql:    "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'SELECT 1'; END $$",
+			reason: RejectUninspectableRoutine,
+		},
+		{
+			name:    "sql function may call existing routine",
+			sql:     "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SELECT existing_wrapper() $$",
+			allowed: true,
+		},
 
 		// Function-call bypass attempts — caught by AST walker.
 		{name: "set_config role rejected", sql: "SELECT set_config('role', 'admin', false)", reason: RejectSetConfig},
