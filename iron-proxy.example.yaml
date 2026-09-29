@@ -713,8 +713,8 @@ transforms:
 #  - Functions that wrap set_config under a different name.
 #
 # Limitations: client→proxy TLS is not supported (SSLRequest is refused);
-# CancelRequest is not forwarded; one shared client credential per route
-# (no per-user).
+# CancelRequest is not forwarded; frontend messages are limited to 16 MiB;
+# one shared client credential per route (no per-user).
 #
 # The proxy runs a single postgres listener: the postgres key is one object
 # with a bind address and a list of upstreams. A single listen address serves
