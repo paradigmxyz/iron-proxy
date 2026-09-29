@@ -703,6 +703,9 @@ transforms:
 #    forms. Dynamic targets cannot be proven safe when the query is parsed.
 #  - The legacy wire-level FunctionCall protocol, which invokes functions by
 #    OID without carrying SQL text the proxy can inspect.
+#  - Function and procedure definitions whose bodies cannot be inspected.
+#    LANGUAGE sql and static LANGUAGE plpgsql bodies are parsed recursively;
+#    dynamic PL/pgSQL and unsupported languages are rejected.
 #  - DO $$ ... $$ blocks — the plpgsql body is opaque to the SQL parser, so
 #    we reject rather than risk an embedded role change.
 #  - Multi-statement Simple Queries — kept as a single-statement guard.
@@ -710,7 +713,7 @@ transforms:
 # Cannot be caught at the wire (defend at the database with role/grant config):
 #  - User-defined SECURITY DEFINER functions that elevate internally.
 #  - Dynamic SQL via plpgsql EXECUTE with a non-literal argument.
-#  - Functions that wrap set_config under a different name.
+#  - Calls to pre-existing functions that wrap set_config under another name.
 #
 # Limitations: client→proxy TLS is not supported (SSLRequest is refused);
 # CancelRequest is not forwarded; frontend messages are limited to 16 MiB;

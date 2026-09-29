@@ -20,7 +20,10 @@
 // function-call equivalents; all calls to `set_config`; any `SET` or `RESET`
 // of a setting the upstream pins; the reset-everything statements
 // `RESET ALL` and `DISCARD ALL` (which would clear the managed role and pinned
-// settings); DO blocks; and the legacy wire-level FunctionCall protocol.
+// settings); DO blocks; uninspectable function and procedure definitions; and
+// the legacy wire-level FunctionCall protocol. SQL and PL/pgSQL routine bodies
+// are inspected recursively, while dynamic PL/pgSQL and other languages are
+// rejected.
 // Multi-statement Simple Queries are allowed as long as every statement passes;
 // a batch is rejected if any statement is rejected. Extended Query, COPY, and
 // prepared statements pass through unchanged.
