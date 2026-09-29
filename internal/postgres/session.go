@@ -14,6 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
+// maxFrontendMessageBodyLen caps every client message after the startup packet.
+// pgproto3 otherwise accepts bodies up to the protocol's multi-gigabyte length
+// field and allocates the declared size before decoding the message.
+const maxFrontendMessageBodyLen = 16 << 20
+
 // runSession owns a single client connection from accept through close. It
 // performs the proxy-side handshake under a deadline, selects a route from the
 // startup database name, opens an upstream connection through pgconn, issues
@@ -24,7 +29,7 @@ func runSession(ctx context.Context, clientConn net.Conn, listener *Listener, lo
 
 	_ = clientConn.SetDeadline(time.Now().Add(handshakeTimeout))
 
-	backend := pgproto3.NewBackend(clientConn, clientConn)
+	backend := newClientBackend(clientConn)
 
 	startup, err := receiveStartup(clientConn, backend)
 	if err != nil {
@@ -109,6 +114,12 @@ func runSession(ctx context.Context, clientConn net.Conn, listener *Listener, lo
 
 	relay := newRelay(clientConn, hijacked.Conn, backend, hijacked.Frontend, upstream, logger)
 	relay.run()
+}
+
+func newClientBackend(conn net.Conn) *pgproto3.Backend {
+	backend := pgproto3.NewBackend(conn, conn)
+	backend.SetMaxBodyLen(maxFrontendMessageBodyLen)
+	return backend
 }
 
 // receiveStartup handles the optional SSLRequest / GSSEncRequest preludes and
