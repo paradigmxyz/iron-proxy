@@ -214,8 +214,21 @@ Transforms run in order. Built-in transforms:
 | Transform   | What it does                                                                                                            |
 | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
 | `allowlist`    | Permits requests to matching domains/CIDRs; rejects everything else (403).                                              |
-| `secrets`      | Scans headers (and optionally query, path, or body) for proxy tokens and swaps in real secrets from environment variables. |
+| `secrets`      | Scans headers (and optionally query, path, or body) for proxy tokens and swaps in real secrets; can also inject credentials outright. |
+| `annotate`     | Captures configured request headers into audit log annotations. Observation-only.                                       |
+| `header_allowlist` | Default-deny request header filter; strips headers not on the list before forwarding.                               |
 | `body_capture` | Records decoded request bodies of matching hosts as `request_body` audit fields. Observation-only; never rejects.       |
+| `judge`        | LLM-backed allow/deny decision with a natural-language policy. Can only reject; never overrides a static deny.          |
+| `grpc`         | Delegates request/response transformation to an external gRPC TransformService.                                         |
+| `hmac_sign`    | Computes an HMAC signature over the request and injects it into configured headers.                                     |
+| `oauth_token`  | Mints short-lived OAuth2 access tokens (refresh token, client credentials, password, or JWT-bearer grant) and injects them. |
+| `aws_auth`     | Re-signs inbound SigV4 requests with real AWS credentials the sandbox never sees.                                       |
+| `gcp_auth`     | Injects a GCP OAuth2 access token, minted from a service-account key or from workload identity (ADC).                   |
+| `gcp_id_token` | Mints Google-signed OIDC ID tokens for audience-authenticated targets (Cloud Run, IAP, API Gateway).                    |
+
+The transforms without a dedicated section below are documented as
+copy-pasteable blocks in
+[`iron-proxy.example.yaml`](iron-proxy.example.yaml).
 
 ## Configuration
 
@@ -1060,6 +1073,21 @@ Reload a running proxy:
 ```bash
 curl -X POST http://127.0.0.1:9092/v1/reload \
   -H "Authorization: Bearer $IRON_MANAGEMENT_API_KEY"
+```
+
+## Health endpoint
+
+iron-proxy always serves a health listener with a single endpoint,
+`GET /healthz`, which returns `200 OK` while the process is up. The Helm
+chart uses it for liveness and readiness probes.
+
+The listener binds `:9090` (all interfaces) by default. Set `metrics.listen`
+in the config, or the `IRON_METRICS_LISTEN` environment variable, to bind it
+to loopback or a private network when workloads must not reach it:
+
+```yaml
+metrics:
+  listen: "127.0.0.1:9090"
 ```
 
 ## iron.sh
