@@ -23,6 +23,11 @@ import (
 
 func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy, string, *x509.CertPool) {
 	t.Helper()
+	return startTunnelProxyWithHandshakeTimeout(t, transforms, 0)
+}
+
+func startTunnelProxyWithHandshakeTimeout(t *testing.T, transforms []transform.Transformer, timeout time.Duration) (*Proxy, string, *x509.CertPool) {
+	t.Helper()
 
 	caCert, caKey := generateTestCA(t)
 	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
@@ -31,12 +36,13 @@ func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy,
 	pipeline := transform.NewPipeline(transforms, transform.BodyLimits{}, testLogger())
 	holder := transform.NewPipelineHolder(pipeline)
 	p := New(Options{
-		HTTPAddr:   "127.0.0.1:0",
-		HTTPSAddr:  "127.0.0.1:0",
-		TunnelAddr: "127.0.0.1:0",
-		CertCache:  cache,
-		Pipeline:   holder,
-		Logger:     testLogger(),
+		HTTPAddr:               "127.0.0.1:0",
+		HTTPSAddr:              "127.0.0.1:0",
+		TunnelAddr:             "127.0.0.1:0",
+		CertCache:              cache,
+		Pipeline:               holder,
+		Logger:                 testLogger(),
+		TunnelHandshakeTimeout: timeout,
 	})
 
 	// Start tunnel listener
@@ -106,6 +112,38 @@ func TestTunnel_CONNECT_HTTP(t *testing.T) {
 	body, err := io.ReadAll(resp2.Body)
 	require.NoError(t, err)
 	require.Equal(t, "hello from tunnel", string(body))
+}
+
+func TestTunnelStalledHandshakesExpire(t *testing.T) {
+	_, tunnelAddr, _ := startTunnelProxyWithHandshakeTimeout(t, nil, 150*time.Millisecond)
+
+	t.Run("initial byte", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", tunnelAddr, time.Second)
+		require.NoError(t, err)
+		defer conn.Close()
+		requirePeerCloses(t, conn)
+	})
+
+	t.Run("partial socks handshake", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", tunnelAddr, time.Second)
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.Write([]byte{0x05})
+		require.NoError(t, err)
+		requirePeerCloses(t, conn)
+	})
+
+	t.Run("post connect protocol", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", tunnelAddr, time.Second)
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = fmt.Fprint(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+		require.NoError(t, err)
+		response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		requirePeerCloses(t, conn)
+	})
 }
 
 func TestTunnel_CONNECT_HTTPS_MITM(t *testing.T) {
@@ -733,6 +771,8 @@ func TestTunnel_SOCKS5_WebSocket(t *testing.T) {
 // MITM branch too, which cannot be exercised end-to-end because
 // handleWebSocket verifies upstream certificates against system roots.
 func TestServeOneHTTPConn_HijackWaitsForHandler(t *testing.T) {
+	p := New(Options{})
+	t.Cleanup(p.shutdownCancel)
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 
@@ -741,7 +781,7 @@ func TestServeOneHTTPConn_HijackWaitsForHandler(t *testing.T) {
 
 	go func() {
 		defer close(serveReturned)
-		err := serveOneHTTPConn(serverConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		err := p.serveOneHTTPConn(serverConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Background HTTP handler: report failures via t.Error.
 			hj, ok := w.(http.Hijacker)
 			if !ok {
