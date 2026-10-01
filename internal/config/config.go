@@ -96,9 +96,19 @@ type DNSRecord struct {
 
 // Proxy configures the HTTP/HTTPS listener addresses.
 type Proxy struct {
-	HTTPListen           string `yaml:"http_listen"`
-	HTTPSListen          string `yaml:"https_listen"`
-	TunnelListen         string `yaml:"tunnel_listen"`
+	HTTPListen   string `yaml:"http_listen"`
+	HTTPSListen  string `yaml:"https_listen"`
+	TunnelListen string `yaml:"tunnel_listen"`
+	// TransparentListen enables the TPROXY ingress: a listener bound with
+	// IP_TRANSPARENT that recovers each connection's ORIGINAL destination from
+	// the socket, so kernel-level TPROXY rules can hand it traffic for any
+	// destination port without per-port NAT. Unlike TunnelListen there is no
+	// client handshake — the destination comes from the socket, not a CONNECT
+	// line or SOCKS5 request. Connections are dispatched through the normal
+	// transform pipeline (default-deny allowlist), then MITM'd or served as
+	// plain HTTP. Requires NET_ADMIN on a short-lived setup step plus the
+	// nftables/ip-rule wiring; the listener itself needs no capability.
+	TransparentListen    string `yaml:"transparent_listen"`
 	MaxRequestBodyBytes  int64  `yaml:"max_request_body_bytes"`
 	MaxResponseBodyBytes int64  `yaml:"max_response_body_bytes"`
 	// UpstreamResponseHeaderTimeout caps how long the proxy waits for an

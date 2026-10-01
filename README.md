@@ -855,33 +855,79 @@ In a production setup you'd load the rules in an entrypoint wrapper and then
 
 For environments where you can't control the workload's DNS at all, nftables
 TPROXY can redirect traffic at the kernel level without any cooperation from
-the workload. This intercepts packets in the PREROUTING chain and hands them
-directly to iron-proxy:
+the workload. It intercepts packets in the `prerouting` chain and hands them
+directly to iron-proxy, which recovers each connection's **original
+destination** from the socket.
 
+This is the difference between TPROXY and DNAT, and it matters: **DNAT rewrites
+the destination away**, so a proxy behind it can never learn the real
+`host:port` and you need one DNAT rule *per port*. TPROXY preserves the original
+destination, so a **single rule covers every port**.
+
+Enable the ingress with `transparent_listen`:
+
+```yaml
+proxy:
+  http_listen: "0.0.0.0:80"
+  https_listen: "0.0.0.0:443"
+  tunnel_listen: "0.0.0.0:8080"
+  # TPROXY ingress: one listener for every intercepted port. The listener is
+  # bound with IP_TRANSPARENT, so it needs CAP_NET_ADMIN at bind time.
+  transparent_listen: "0.0.0.0:5555"
 ```
-table ip iron {
+
+Then install the interception rules **in the proxy's own network namespace**:
+
+```nft
+table ip iron-tproxy {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
 
-    # redirect HTTP/HTTPS to iron-proxy via TPROXY
-    tcp dport 80 tproxy to 172.20.0.2:80 meta mark set 1 accept
-    tcp dport 443 tproxy to 172.20.0.2:443 meta mark set 1 accept
-  }
+    # Never intercept the proxy's own control plane or its LAN peers, or you
+    # intercept the proxy's own traffic and loop.
+    ip daddr { 10.10.10.0/24, 172.28.0.0/24, 127.0.0.0/8 } return
 
-  chain output {
-    type route hook output priority mangle; policy accept;
-
-    # mark locally-originated packets for policy routing
-    tcp dport { 80, 443 } meta mark set 1
+    # One rule, EVERY destination port. `tproxy` is a statement, not a target
+    # — `tproxy to :5555` (what we want), not `to-destination :5555`.
+    meta l4proto tcp tproxy to :5555 meta mark set 1 accept
   }
 }
 ```
 
-This requires `ip rule` and `ip route` setup to route marked packets to a
-local socket, plus iron-proxy must bind with `IP_TRANSPARENT`. This is more
-complex to set up but provides the strongest guarantee that traffic can't
-bypass the proxy. TPROXY operates below DNS, so it catches hardcoded IPs,
-custom resolvers, and anything else the workload might try.
+```bash
+# Policy routing: send marked packets to a local socket instead of forwarding.
+ip rule add fwmark 1 lookup 100
+ip route add local 0.0.0.0/0 dev lo table 100
+```
+
+Notes that matter in practice:
+
+- **The mark targets the intercepted flows, not the listener port.** Marking
+  `tcp dport 5555` marks nothing useful: by then the destination is already the
+  proxy.
+- **The `output` chain is only needed when the workload shares the proxy's
+  namespace.** In the usual sidecar arrangement the workload is in a *different*
+  namespace, so its packets arrive in `prerouting`; the proxy's own outbound
+  connections are locally generated and traverse `output`, so they are not
+  captured and no explicit exclusion is required. If they *do* share a
+  namespace, mark in `output` **and** exclude the proxy's own egress (by UID or
+  by upstream address) or you get a redirect loop.
+- **`CAP_NET_ADMIN` is needed to install the rules and to bind the listener**
+  with `IP_TRANSPARENT`. Both are setup-time; the accepted connections need no
+  capability. In a container the usual pattern is a privileged one-shot that
+  installs the rules and exits, with the proxy itself otherwise unprivileged.
+- Connections are dispatched through the same transform pipeline as everything
+  else — a synthetic `CONNECT` evaluated against your allowlist and secrets
+  transforms — so transparency does not bypass default-deny. The destination is
+  an IP:port (there is no hostname to match), so allowlist by `cidrs`.
+
+TPROXY operates below DNS, so it catches hardcoded IPs, custom resolvers, and
+anything else the workload might try.
+
+Protocol support is unchanged by the ingress: after the policy check the proxy
+peeks the first byte, so TLS is MITM'd and plain HTTP is served. A protocol that
+is neither (raw SSH, for example) is rejected — transparency broadens *which
+ports* are intercepted, not which protocols can be carried.
 
 ## Docker Compose example
 

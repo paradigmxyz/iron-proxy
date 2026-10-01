@@ -38,6 +38,9 @@ func applyEnvOverrides(cfg *Config) error {
 	if v := os.Getenv("IRON_PROXY_TUNNEL_LISTEN"); v != "" {
 		cfg.Proxy.TunnelListen = v
 	}
+	if v := os.Getenv("IRON_PROXY_TRANSPARENT_LISTEN"); v != "" {
+		cfg.Proxy.TransparentListen = v
+	}
 	if v := os.Getenv("IRON_TLS_MODE"); v != "" {
 		cfg.TLS.Mode = v
 	}

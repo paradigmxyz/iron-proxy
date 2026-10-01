@@ -43,6 +43,9 @@ type Proxy struct {
 	tunnelAddr           string
 	tunnelListener       net.Listener
 	tunnelDone           chan struct{}
+	transparentAddr      string
+	transparentListener  net.Listener
+	transparentDone      chan struct{}
 	certCache            *certcache.Cache
 	pipeline             *transform.PipelineHolder
 	transport            *http.Transport
@@ -72,13 +75,15 @@ type Options struct {
 	HTTPAddr   string
 	HTTPSAddr  string
 	TunnelAddr string
-	TLSMode    string
-	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
-	Pipeline   *transform.PipelineHolder
-	Resolver   *net.Resolver
-	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
-	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
-	MCPGateway *mcpgateway.Holder
+	// TransparentAddr enables the TPROXY ingress (see config.Proxy.TransparentListen).
+	TransparentAddr string
+	TLSMode         string
+	CertCache       *certcache.Cache // required when TLSMode == config.TLSModeMITM
+	Pipeline        *transform.PipelineHolder
+	Resolver        *net.Resolver
+	Guard           *dnsguard.Guard   // nil is treated as an empty (no-op) guard
+	MCPPolicy       *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
+	MCPGateway      *mcpgateway.Holder
 	// ResponseRetryHandler may add headers and replay the exact transformed
 	// request once after selected upstream response statuses.
 	ResponseRetryHandler *responseretry.Handler
@@ -116,6 +121,8 @@ func New(opts Options) *Proxy {
 		tlsMode:              opts.TLSMode,
 		tunnelAddr:           opts.TunnelAddr,
 		tunnelDone:           make(chan struct{}),
+		transparentAddr:      opts.TransparentAddr,
+		transparentDone:      make(chan struct{}),
 		certCache:            opts.CertCache,
 		pipeline:             opts.Pipeline,
 		transport:            buildTransport(opts.Resolver, guard, opts.UpstreamResponseHeaderTimeout, opts.UpstreamProxy),
@@ -148,12 +155,15 @@ func New(opts Options) *Proxy {
 	return p
 }
 
-// ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel listeners.
-// It blocks until any server has stopped.
+// ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel and
+// transparent (TPROXY) listeners. It blocks until any server has stopped.
 func (p *Proxy) ListenAndServe() error {
 	n := 2
 	if p.tunnelAddr != "" {
-		n = 3
+		n++
+	}
+	if p.transparentAddr != "" {
+		n++
 	}
 	errc := make(chan error, n)
 
@@ -178,6 +188,12 @@ func (p *Proxy) ListenAndServe() error {
 	if p.tunnelAddr != "" {
 		go func() {
 			errc <- fmt.Errorf("tunnel: %w", p.listenTunnel())
+		}()
+	}
+
+	if p.transparentAddr != "" {
+		go func() {
+			errc <- fmt.Errorf("transparent: %w", p.listenTransparent())
 		}()
 	}
 
@@ -241,6 +257,12 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	close(p.tunnelDone)
 	if p.tunnelListener != nil {
 		p.tunnelListener.Close()
+	}
+
+	// Same for the transparent (TPROXY) accept loop.
+	close(p.transparentDone)
+	if p.transparentListener != nil {
+		p.transparentListener.Close()
 	}
 
 	if errHTTP != nil {
