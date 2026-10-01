@@ -104,6 +104,11 @@ type TunnelInfo struct {
 	// audit consume this to attribute tunnel-level annotations to the
 	// transform that produced them.
 	RequestTransforms []TransformTrace
+
+	// Credential is the Proxy-Authorization value presented on the CONNECT,
+	// kept so per-request policy can re-check it. Never serialized: TunnelInfo
+	// reaches audit output.
+	Credential string `json:"-"`
 }
 
 // Annotate attaches audit metadata to the current transform's trace.
