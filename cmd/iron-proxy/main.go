@@ -233,6 +233,7 @@ func main() {
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
 		HTTPSAddr:                     cfg.Proxy.HTTPSListen,
 		TunnelAddr:                    cfg.Proxy.TunnelListen,
+		TransparentAddr:               cfg.Proxy.TransparentListen,
 		TLSMode:                       cfg.TLS.Mode,
 		CertCache:                     certCache,
 		Pipeline:                      holder,
@@ -295,6 +296,9 @@ func main() {
 	}
 	if cfg.Proxy.TunnelListen != "" {
 		startAttrs = append(startAttrs, slog.String("tunnel_listen", cfg.Proxy.TunnelListen))
+	}
+	if cfg.Proxy.TransparentListen != "" {
+		startAttrs = append(startAttrs, slog.String("transparent_listen", cfg.Proxy.TransparentListen))
 	}
 	logger.Info("iron-proxy starting", startAttrs...)
 	if pipeline := holder.Load(); !pipeline.Empty() {
