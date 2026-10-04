@@ -832,9 +832,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 			p.logger.Debug("websocket client->upstream copy error", slog.String("error", err.Error()))
 		}
 		// Signal upstream we're done writing
-		if tc, ok := upstreamConn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
+		closeWrite(upstreamConn)
 	}()
 
 	go func() {
@@ -843,9 +841,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 			p.logger.Debug("websocket upstream->client copy error", slog.String("error", err.Error()))
 		}
 		// Signal client we're done writing
-		if tc, ok := clientConn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		}
+		closeWrite(clientConn)
 	}()
 
 	wg.Wait()
@@ -853,6 +849,22 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 	upstreamConn.Close()
 
 	p.logger.Debug("websocket connection closed", slog.String("host", host))
+}
+
+// closeWrite tells the peer on c that nothing more will be written, so the
+// other half of a proxied WebSocket can finish. *net.TCPConn and *tls.Conn
+// (close_notify) both support a half-close; in MITM mode both legs are
+// *tls.Conn. A connection without one is closed outright: otherwise the
+// opposite io.Copy would wait for the peer's idle timeout.
+func closeWrite(c net.Conn) {
+	if cw, ok := c.(interface{ CloseWrite() error }); ok {
+		if err := cw.CloseWrite(); err == nil {
+			return
+		}
+	}
+	// Error ignored: the leg is being torn down either way, and
+	// handleWebSocket closes both connections once the copies finish.
+	_ = c.Close()
 }
 
 // isSSE detects a Server-Sent Events response.
