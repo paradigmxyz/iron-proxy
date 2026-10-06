@@ -492,6 +492,12 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 			Code:     "42501",
 			Message:  "blocked by iron-proxy policy: set_config is not supported because session settings are managed by the proxy",
 		}
+	case RejectSettingsCatalogWrite:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "42501",
+			Message:  "blocked by iron-proxy policy: writing to pg_settings, or defining a view or rule over it, is not supported because session settings are managed by the proxy",
+		}
 	case RejectFunctionCall:
 		return &pgproto3.ErrorResponse{
 			Severity: "ERROR",

@@ -373,6 +373,22 @@ func TestPostgresPolicy(t *testing.T) {
 		require.Equal(t, pgRole, currentRole(t, conn))
 	})
 
+	t.Run("pg_settings writes are rejected", func(t *testing.T) {
+		// pg_settings' update rule calls set_config, and an auto-updatable
+		// view over it forwards updates, so both would bypass pinned settings.
+		conn := dial(t, pgClientPassword)
+		for _, sql := range []string{
+			"UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'",
+			"CREATE TEMP VIEW settings_view AS SELECT * FROM pg_settings",
+		} {
+			err := exec(t, conn, sql)
+			require.Error(t, err)
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr))
+			require.Contains(t, pgErr.Message, "writing to pg_settings")
+		}
+	})
+
 	t.Run("do block is rejected", func(t *testing.T) {
 		conn := dial(t, pgClientPassword)
 		err := exec(t, conn, "DO $$ BEGIN PERFORM 1; END $$")

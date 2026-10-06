@@ -129,6 +129,9 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set_config parameter target rejected", sql: "SELECT set_config($1, $2, false)", reason: RejectSetConfig},
 		{name: "set_config cast target rejected", sql: "SELECT set_config('role'::text, 'admin', false)", reason: RejectSetConfig},
 		{name: "current_setting role allowed", sql: "SELECT current_setting('role')", allowed: true},
+		{name: "update pg_settings rejected", sql: "UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'", reason: RejectSettingsCatalogWrite},
+		{name: "view over pg_settings rejected", sql: "CREATE TEMP VIEW v AS SELECT * FROM pg_settings", reason: RejectSettingsCatalogWrite},
+		{name: "select pg_settings allowed", sql: "SELECT name, setting FROM pg_settings", allowed: true},
 
 		// DO blocks rejected outright.
 		{name: "do block rejected", sql: "DO $$ BEGIN END $$", reason: RejectDoBlock},

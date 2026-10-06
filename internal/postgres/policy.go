@@ -33,6 +33,10 @@ const (
 	// RejectUninspectableRoutine — the client tried to define a function or
 	// procedure whose body cannot be inspected safely.
 	RejectUninspectableRoutine
+	// RejectSettingsCatalogWrite — the client tried to UPDATE or INSERT into
+	// pg_settings, or define a view or rule over it. Writes through pg_settings
+	// call set_config and would bypass pinned settings.
+	RejectSettingsCatalogWrite
 )
 
 // ClassifyClientStatement inspects sql and returns whether the relay should
@@ -40,9 +44,10 @@ const (
 // the lowercased set of setting names this upstream forbids the client from
 // mutating; pass nil when the upstream pins nothing.
 //
-// Beyond the role policy, the proxy rejects every set_config call, any SET or
-// RESET of a pinned setting, and any RESET ALL / DISCARD ALL (which would reset
-// the managed role and every pinned setting at once).
+// Beyond the role policy, the proxy rejects every set_config call, writes to
+// pg_settings (directly or via a client-defined view or rule), any SET or RESET
+// of a pinned setting, and any RESET ALL / DISCARD ALL (which would reset the
+// managed role and every pinned setting at once).
 //
 // Multi-statement Simple Queries are allowed when every statement passes;
 // Classify aggregates the batch, so a single offending statement anywhere
@@ -64,6 +69,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectDoBlock
 	case OpUninspectableRoutine:
 		return false, RejectUninspectableRoutine
+	case OpSettingsCatalogWrite:
+		return false, RejectSettingsCatalogWrite
 	}
 	// RESET ALL / DISCARD ALL reset the proxy-managed role regardless of which
 	// settings the upstream pins, so they are always rejected.

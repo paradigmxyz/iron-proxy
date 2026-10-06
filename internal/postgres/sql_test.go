@@ -78,6 +78,21 @@ func TestClassify(t *testing.T) {
 		// walker through the nested SelectStmt.
 		{name: "prepare wrapping set_config caught", sql: "PREPARE p AS SELECT set_config('role', 'admin', false)", want: OpSetConfig},
 
+		// pg_settings writes reach set_config through its update rule; an
+		// auto-updatable view or a rule over it forwards writes the same way.
+		{name: "update pg_settings", sql: "UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'", want: OpSettingsCatalogWrite},
+		{name: "update qualified pg_settings", sql: "UPDATE pg_catalog.pg_settings SET setting = '0' WHERE name = 'statement_timeout'", want: OpSettingsCatalogWrite},
+		{name: "update pg_settings in cte", sql: "WITH x AS (UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout') SELECT 1", want: OpSettingsCatalogWrite},
+		{name: "prepare update pg_settings", sql: "PREPARE p AS UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'", want: OpSettingsCatalogWrite},
+		{name: "insert pg_settings", sql: "INSERT INTO pg_settings (name, setting) VALUES ('statement_timeout', '0')", want: OpSettingsCatalogWrite},
+		{name: "view over pg_settings", sql: "CREATE TEMP VIEW v AS SELECT * FROM pg_settings", want: OpSettingsCatalogWrite},
+		{name: "view over pg_settings subquery", sql: "CREATE VIEW v AS SELECT * FROM (SELECT name, setting FROM pg_catalog.pg_settings) s", want: OpSettingsCatalogWrite},
+		{name: "rule updating pg_settings", sql: "CREATE RULE r AS ON INSERT TO t DO ALSO UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'", want: OpSettingsCatalogWrite},
+		{name: "multi benign then update pg_settings", sql: "SELECT 1; UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'", want: OpSettingsCatalogWrite},
+		{name: "select pg_settings is other", sql: "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'", want: OpOther},
+		{name: "update reading pg_settings is other", sql: "UPDATE t SET x = (SELECT setting FROM pg_settings WHERE name = 'work_mem')", want: OpOther},
+		{name: "view not over pg_settings is other", sql: "CREATE VIEW v AS SELECT * FROM t", want: OpOther},
+
 		// DO blocks — rejected regardless of contents.
 		{name: "do block empty", sql: "DO $$ BEGIN END $$", want: OpDoBlock},
 		{name: "do block with set role", sql: "DO $$ BEGIN EXECUTE 'SET ROLE admin'; END $$", want: OpDoBlock},
@@ -133,6 +148,16 @@ func TestClassify(t *testing.T) {
 			name: "plpgsql perform calls set_config",
 			sql:  "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN PERFORM set_config('centaur.slack_user', 'U999', false); END $$",
 			want: OpSetConfig,
+		},
+		{
+			name: "sql function updates pg_settings",
+			sql:  "CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout' $$",
+			want: OpSettingsCatalogWrite,
+		},
+		{
+			name: "plpgsql function updates pg_settings",
+			sql:  "CREATE FUNCTION f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'; END $$",
+			want: OpSettingsCatalogWrite,
 		},
 		{
 			name: "plpgsql procedure sets pinned guc",

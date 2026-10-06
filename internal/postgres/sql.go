@@ -77,6 +77,12 @@ const (
 	// whose body cannot be inspected. Dynamic PL/pgSQL and unsupported languages
 	// can hide role or GUC changes, so the policy rejects their definitions.
 	OpUninspectableRoutine
+	// OpSettingsCatalogWrite is an UPDATE or INSERT targeting pg_settings, or a
+	// view or rule definition referencing it. pg_settings' update rule calls
+	// set_config with the row's name, and an auto-updatable view over it
+	// forwards updates the same way, so these reach any listed setting —
+	// including pinned built-in ones — without a set_config call in the SQL.
+	OpSettingsCatalogWrite
 )
 
 // GUC names whose mutation we treat as a role change for policy purposes.
@@ -403,6 +409,18 @@ func scanMutations(node *pg_query.Node) mutations {
 			}
 		case *pg_query.VariableShowStmt:
 			// SHOW is read-only; ignore.
+		case *pg_query.UpdateStmt:
+			if isPgSettings(n.GetRelation()) && m.kind == 0 {
+				m.kind = OpSettingsCatalogWrite
+			}
+		case *pg_query.InsertStmt:
+			if isPgSettings(n.GetRelation()) && m.kind == 0 {
+				m.kind = OpSettingsCatalogWrite
+			}
+		case *pg_query.ViewStmt, *pg_query.RuleStmt:
+			if referencesPgSettings(msg) && m.kind == 0 {
+				m.kind = OpSettingsCatalogWrite
+			}
 		case *pg_query.FuncCall:
 			if name, ok := setConfigTarget(n); ok {
 				if name != "" {
@@ -416,6 +434,26 @@ func scanMutations(node *pg_query.Node) mutations {
 		return true
 	})
 	return m
+}
+
+// isPgSettings reports whether rv names pg_settings. Any schema qualifier is
+// matched: a user relation of that name is a harmless false positive, while
+// schema-matching would have to track search_path.
+func isPgSettings(rv *pg_query.RangeVar) bool {
+	return rv != nil && rv.GetRelname() == "pg_settings"
+}
+
+// referencesPgSettings reports whether any relation reference in the tree
+// rooted at m names pg_settings.
+func referencesPgSettings(m protoreflect.Message) bool {
+	found := false
+	walkProto(m, func(msg protoreflect.Message) bool {
+		if rv, ok := msg.Interface().(*pg_query.RangeVar); ok && isPgSettings(rv) {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // roleKindFor returns the role-policy OpKind for a SET/RESET of the named GUC,
