@@ -35,6 +35,15 @@ INSERT INTO items (owner, data) VALUES
   ('other_role',  'theirs-2'),
   ('other_role',  'theirs-3');
 
+-- Defense in depth behind the proxy's statement policy: the client-facing
+-- role cannot create temporary objects or call set_config, so an executable
+-- alias the classifier misses still cannot change the role or a pinned
+-- setting. The login (a superuser here; a non-superuser login needs an
+-- explicit GRANT EXECUTE) keeps set_config for the proxy's session setup.
+REVOKE TEMPORARY ON DATABASE appdb FROM PUBLIC;
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC;
+
 -- A second database so the multi-upstream test can route to two distinct
 -- databases. The proxy requires each upstream's routing database to match the
 -- database its DSN connects to, so testing more than one upstream needs more

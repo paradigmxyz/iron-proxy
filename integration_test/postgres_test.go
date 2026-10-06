@@ -389,6 +389,18 @@ func TestPostgresPolicy(t *testing.T) {
 		}
 	})
 
+	t.Run("callback definition aliasing set_config is rejected", func(t *testing.T) {
+		// An aggregate whose SFUNC is set_config would let the client invoke
+		// set_config under another name, bypassing the FuncCall check.
+		conn := dial(t, pgClientPassword)
+		err := exec(t, conn, "CREATE AGGREGATE pg_temp.cfg(text, boolean) (SFUNC = pg_catalog.set_config, STYPE = text, INITCOND = 'role')")
+		require.Error(t, err)
+		var pgErr *pgconn.PgError
+		require.True(t, errors.As(err, &pgErr))
+		require.Contains(t, pgErr.Message, "bind functions as callbacks")
+		require.Equal(t, pgRole, currentRole(t, conn))
+	})
+
 	t.Run("do block is rejected", func(t *testing.T) {
 		conn := dial(t, pgClientPassword)
 		err := exec(t, conn, "DO $$ BEGIN PERFORM 1; END $$")
