@@ -498,6 +498,12 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 			Code:     "42501",
 			Message:  "blocked by iron-proxy policy: writing to pg_settings, or defining a view or rule over it, is not supported because session settings are managed by the proxy",
 		}
+	case RejectCallbackDefinition:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "0A000",
+			Message:  "blocked by iron-proxy policy: definitions that bind functions as callbacks (aggregates, operators, types, casts, and similar) are not supported",
+		}
 	case RejectFunctionCall:
 		return &pgproto3.ErrorResponse{
 			Severity: "ERROR",

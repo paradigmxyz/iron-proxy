@@ -83,6 +83,14 @@ const (
 	// forwards updates the same way, so these reach any listed setting —
 	// including pinned built-in ones — without a set_config call in the SQL.
 	OpSettingsCatalogWrite
+	// OpCallbackDefinition is a statement that binds existing functions by
+	// name into catalog metadata that PostgreSQL later invokes implicitly:
+	// CREATE AGGREGATE (SFUNC, FINALFUNC, ...), CREATE OPERATOR, CREATE TYPE,
+	// CREATE CAST WITH FUNCTION, operator class support functions, and
+	// similar. Such definitions create executable aliases (e.g. an aggregate
+	// whose SFUNC is pg_catalog.set_config) that the FuncCall-based
+	// classifier cannot see at call time, so the policy rejects them.
+	OpCallbackDefinition
 )
 
 // GUC names whose mutation we treat as a role change for policy purposes.
@@ -421,6 +429,20 @@ func scanMutations(node *pg_query.Node) mutations {
 			if referencesPgSettings(msg) && m.kind == 0 {
 				m.kind = OpSettingsCatalogWrite
 			}
+		case *pg_query.DefineStmt:
+			if definesCallbacks(n.GetKind()) && m.kind == 0 {
+				m.kind = OpCallbackDefinition
+			}
+		case *pg_query.CreateRangeStmt, *pg_query.CreateCastStmt,
+			*pg_query.CreateOpClassStmt, *pg_query.AlterOpFamilyStmt,
+			*pg_query.AlterOperatorStmt, *pg_query.AlterTypeStmt,
+			*pg_query.CreateConversionStmt, *pg_query.CreatePLangStmt,
+			*pg_query.CreateFdwStmt, *pg_query.AlterFdwStmt,
+			*pg_query.CreateAmStmt, *pg_query.CreateTransformStmt,
+			*pg_query.CreateEventTrigStmt:
+			if m.kind == 0 {
+				m.kind = OpCallbackDefinition
+			}
 		case *pg_query.FuncCall:
 			if name, ok := setConfigTarget(n); ok {
 				if name != "" {
@@ -434,6 +456,20 @@ func scanMutations(node *pg_query.Node) mutations {
 		return true
 	})
 	return m
+}
+
+// definesCallbacks reports whether a DefineStmt of the given kind can bind
+// functions by name. Collations and text search dictionaries and
+// configurations reference no functions directly; every other kind
+// (aggregates, operators, types, text search parsers and templates) does.
+func definesCallbacks(kind pg_query.ObjectType) bool {
+	switch kind {
+	case pg_query.ObjectType_OBJECT_COLLATION,
+		pg_query.ObjectType_OBJECT_TSDICTIONARY,
+		pg_query.ObjectType_OBJECT_TSCONFIGURATION:
+		return false
+	}
+	return true
 }
 
 // isPgSettings reports whether rv names pg_settings. Any schema qualifier is

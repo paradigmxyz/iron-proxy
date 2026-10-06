@@ -37,6 +37,11 @@ const (
 	// pg_settings, or define a view or rule over it. Writes through pg_settings
 	// call set_config and would bypass pinned settings.
 	RejectSettingsCatalogWrite
+	// RejectCallbackDefinition — the client tried to define an aggregate,
+	// operator, type, cast, or other object that binds existing functions as
+	// implicitly invoked callbacks. These create executable aliases (e.g. an
+	// aggregate whose SFUNC is set_config) the classifier cannot see.
+	RejectCallbackDefinition
 )
 
 // ClassifyClientStatement inspects sql and returns whether the relay should
@@ -45,7 +50,8 @@ const (
 // mutating; pass nil when the upstream pins nothing.
 //
 // Beyond the role policy, the proxy rejects every set_config call, writes to
-// pg_settings (directly or via a client-defined view or rule), any SET or RESET
+// pg_settings (directly or via a client-defined view or rule), definitions that
+// bind functions as implicit callbacks (CREATE AGGREGATE and friends), any SET or RESET
 // of a pinned setting, and any RESET ALL / DISCARD ALL (which would reset the
 // managed role and every pinned setting at once).
 //
@@ -71,6 +77,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectUninspectableRoutine
 	case OpSettingsCatalogWrite:
 		return false, RejectSettingsCatalogWrite
+	case OpCallbackDefinition:
+		return false, RejectCallbackDefinition
 	}
 	// RESET ALL / DISCARD ALL reset the proxy-managed role regardless of which
 	// settings the upstream pins, so they are always rejected.

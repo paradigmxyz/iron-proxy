@@ -93,6 +93,24 @@ func TestClassify(t *testing.T) {
 		{name: "update reading pg_settings is other", sql: "UPDATE t SET x = (SELECT setting FROM pg_settings WHERE name = 'work_mem')", want: OpOther},
 		{name: "view not over pg_settings is other", sql: "CREATE VIEW v AS SELECT * FROM t", want: OpOther},
 
+		// Definitions that bind existing functions as implicitly invoked
+		// callbacks create executable aliases the FuncCall check cannot see.
+		{name: "aggregate with set_config sfunc", sql: "CREATE AGGREGATE pg_temp.a(text, boolean) (SFUNC = pg_catalog.set_config, STYPE = text)", want: OpCallbackDefinition},
+		{name: "aggregate with benign sfunc", sql: "CREATE AGGREGATE a(integer) (SFUNC = int4pl, STYPE = integer)", want: OpCallbackDefinition},
+		{name: "operator definition", sql: "CREATE OPERATOR === (LEFTARG = text, RIGHTARG = text, FUNCTION = texteq)", want: OpCallbackDefinition},
+		{name: "base type definition", sql: "CREATE TYPE t (INPUT = t_in, OUTPUT = t_out)", want: OpCallbackDefinition},
+		{name: "range type definition", sql: "CREATE TYPE r AS RANGE (SUBTYPE = integer, SUBTYPE_DIFF = f)", want: OpCallbackDefinition},
+		{name: "cast with function", sql: "CREATE CAST (text AS t) WITH FUNCTION f(text)", want: OpCallbackDefinition},
+		{name: "operator class support function", sql: "CREATE OPERATOR CLASS c FOR TYPE t USING btree AS FUNCTION 1 f(t, t)", want: OpCallbackDefinition},
+		{name: "alter operator family add function", sql: "ALTER OPERATOR FAMILY fam USING btree ADD FUNCTION 1 f(t, t)", want: OpCallbackDefinition},
+		{name: "alter operator restrict", sql: "ALTER OPERATOR === (text, text) SET (RESTRICT = f)", want: OpCallbackDefinition},
+		{name: "alter type set callbacks", sql: "ALTER TYPE t SET (SEND = f)", want: OpCallbackDefinition},
+		{name: "conversion definition", sql: "CREATE CONVERSION c FOR 'UTF8' TO 'LATIN1' FROM f", want: OpCallbackDefinition},
+		{name: "multi benign then aggregate", sql: "SELECT 1; CREATE AGGREGATE a(text, boolean) (SFUNC = set_config, STYPE = text)", want: OpCallbackDefinition},
+		{name: "composite type is other", sql: "CREATE TYPE t AS (a integer, b text)", want: OpOther},
+		{name: "enum type is other", sql: "CREATE TYPE e AS ENUM ('a', 'b')", want: OpOther},
+		{name: "collation is other", sql: "CREATE COLLATION c (provider = icu, locale = 'und')", want: OpOther},
+
 		// DO blocks — rejected regardless of contents.
 		{name: "do block empty", sql: "DO $$ BEGIN END $$", want: OpDoBlock},
 		{name: "do block with set role", sql: "DO $$ BEGIN EXECUTE 'SET ROLE admin'; END $$", want: OpDoBlock},

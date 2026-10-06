@@ -131,6 +131,7 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "current_setting role allowed", sql: "SELECT current_setting('role')", allowed: true},
 		{name: "update pg_settings rejected", sql: "UPDATE pg_settings SET setting = '0' WHERE name = 'statement_timeout'", reason: RejectSettingsCatalogWrite},
 		{name: "view over pg_settings rejected", sql: "CREATE TEMP VIEW v AS SELECT * FROM pg_settings", reason: RejectSettingsCatalogWrite},
+		{name: "aggregate aliasing set_config rejected", sql: "CREATE AGGREGATE pg_temp.a(text, boolean) (SFUNC = pg_catalog.set_config, STYPE = text)", reason: RejectCallbackDefinition},
 		{name: "select pg_settings allowed", sql: "SELECT name, setting FROM pg_settings", allowed: true},
 
 		// DO blocks rejected outright.

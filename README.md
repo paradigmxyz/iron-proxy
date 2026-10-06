@@ -48,9 +48,14 @@ Single binary. Single YAML config.
 - **PostgreSQL MITM proxy.** Optional listener that authenticates clients
   against proxy-managed credentials, injects `SET ROLE` on the upstream
   session, and rejects client attempts to mutate the role (`SET ROLE`,
-  any `set_config` call, DO blocks, unsafe function definitions, etc.) via a
+  any `set_config` call, DO blocks, unsafe function definitions, definitions
+  that bind functions as callbacks such as `CREATE AGGREGATE`, etc.) via a
   SQL AST walk. SQL and PL/pgSQL routine bodies are inspected recursively;
-  dynamic PL/pgSQL and unsupported routine languages are rejected. Pairs with
+  dynamic PL/pgSQL and unsupported routine languages are rejected. As defense
+  in depth, revoke `EXECUTE` on `pg_catalog.set_config` and unneeded
+  `TEMPORARY` / `CREATE` privileges from the injected role (e.g. from
+  `PUBLIC`), granting `set_config` back only to the login user that the proxy
+  uses for session setup. Pairs with
   PostgreSQL row-level security to give per-tenant data isolation when the
   application connects as a shared service-account user. **Requires
   PgBouncer (if used) to run in `pool_mode = session`** — transaction or

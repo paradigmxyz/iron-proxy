@@ -21,7 +21,9 @@
 // of a setting the upstream pins; the reset-everything statements
 // `RESET ALL` and `DISCARD ALL` (which would clear the managed role and pinned
 // settings); UPDATE or INSERT on pg_settings and view or rule definitions over
-// it; DO blocks; uninspectable function and procedure definitions; and
+// it; DO blocks; uninspectable function and procedure definitions;
+// definitions that bind functions as implicit callbacks (CREATE AGGREGATE,
+// CREATE OPERATOR, CREATE TYPE, CREATE CAST, and similar); and
 // the legacy wire-level FunctionCall protocol. SQL and PL/pgSQL routine bodies
 // are inspected recursively, while dynamic PL/pgSQL and other languages are
 // rejected.
