@@ -340,6 +340,20 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		}
 	}
 
+	// Bind the inner request to the CONNECT authority. The tunnel was
+	// authorized for tunnelInfo.Target but the proxy dials r.Host, so a client
+	// could otherwise CONNECT to an allowed host and then address a different
+	// one behind the same front end (RFC 9110 §7.4). Together with the SNI
+	// check above this yields CONNECT target == SNI == Host.
+	if tunnelInfo != nil && tunnelInfo.Target != "" && !sameAuthority(r.Host, tunnelInfo.Target, scheme) {
+		p.logger.Warn("Host does not match CONNECT target",
+			slog.String("connect_target", tunnelInfo.Target),
+			slog.String("host", r.Host),
+		)
+		http.Error(w, "Host does not match CONNECT target", http.StatusBadRequest)
+		return
+	}
+
 	// Clone tunnelInfo so a transform that mutates the annotations map can't
 	// leak state into sibling requests that share the same tunnel.
 	tctx := &transform.TransformContext{
@@ -984,6 +998,29 @@ func containsDotSegments(p string) bool {
 		}
 	}
 	return false
+}
+
+// sameAuthority reports whether an inner request's Host names the same origin
+// as the CONNECT target: host compared case-insensitively, port by value, with
+// the scheme's default port filled in when absent (RFC 9110 §4.2.3).
+func sameAuthority(innerHost, connectTarget, scheme string) bool {
+	def := "443"
+	if scheme == "http" {
+		def = "80"
+	}
+	ih, ip := hostPortOrDefault(innerHost, def)
+	ch, cp := hostPortOrDefault(connectTarget, def)
+	return strings.EqualFold(ih, ch) && ip == cp
+}
+
+// hostPortOrDefault splits host:port, using def when no port is present. A
+// bracketed IPv6 literal without a port is unwrapped so it compares equal to
+// the host net.SplitHostPort returns for the with-port form.
+func hostPortOrDefault(hostport, def string) (host, port string) {
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		return h, p
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(hostport, "["), "]"), def
 }
 
 func copyHeaders(dst, src http.Header) {
