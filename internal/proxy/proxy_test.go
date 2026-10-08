@@ -861,6 +861,64 @@ func TestHTTPProxy_WebSocketHopByHopHeadersStripped(t *testing.T) {
 	require.Contains(t, lower, "connection: upgrade")
 }
 
+// TestCloseWrite covers the half-close handleWebSocket sends when one side of
+// a proxied WebSocket finishes. In MITM mode both legs are *tls.Conn, which
+// must be half-closed too: otherwise the peer is never told and the session
+// (and its audit record) waits for the peer's idle timeout.
+func TestCloseWrite(t *testing.T) {
+	t.Run("tls conn is half-closed", func(t *testing.T) {
+		caCert, caKey := generateTestCA(t)
+		ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+			Certificates: []tls.Certificate{{Certificate: [][]byte{caCert.Raw}, PrivateKey: caKey}},
+		})
+		require.NoError(t, err)
+		defer ln.Close()
+
+		received := make(chan string, 1)
+		go func() {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			// Reads until the client's close_notify.
+			b, _ := io.ReadAll(conn) // error surfaces as a mismatch on received
+			received <- string(b)
+			_, _ = conn.Write([]byte("bye")) // a failed write surfaces as a mismatch below
+		}()
+
+		conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{InsecureSkipVerify: true})
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = conn.Write([]byte("hello"))
+		require.NoError(t, err)
+
+		closeWrite(conn)
+
+		select {
+		case got := <-received:
+			require.Equal(t, "hello", got)
+		case <-time.After(2 * time.Second):
+			t.Fatal("peer did not see the half-close")
+		}
+		// Only the write side is closed: the peer's reply still arrives.
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+		reply, err := io.ReadAll(conn)
+		require.NoError(t, err)
+		require.Equal(t, "bye", string(reply))
+	})
+
+	t.Run("conn without half-close is closed", func(t *testing.T) {
+		a, b := net.Pipe()
+		defer b.Close()
+
+		closeWrite(a)
+
+		_, err := b.Read(make([]byte, 1))
+		require.ErrorIs(t, err, io.EOF)
+	})
+}
+
 func TestIsWebSocketUpgrade(t *testing.T) {
 	cases := []struct {
 		name       string
