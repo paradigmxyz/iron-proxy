@@ -38,6 +38,15 @@ proxy:
   # to begin replying (e.g. LLM context-compaction endpoints).
   # upstream_response_header_timeout: "5m"
   #
+  # Identify this proxy in an RFC 9209 Proxy-Status header on responses it
+  # generates itself (transform rejections, upstream failures) so clients can
+  # tell them from origin responses. Off when unset. proxy_status_verbose
+  # reveals the precise upstream error type (denied CIDR vs DNS failure vs
+  # refused port), which is a disclosure for a filtering proxy, so it defaults
+  # to false.
+  # proxy_status_name: "egress"
+  # proxy_status_verbose: false
+  #
   # CIDRs the proxy refuses to dial upstream. Enforced at TCP connect time
   # against the resolved address — defeats DNS rebinding and TOCTOU between
   # allowlist evaluation and the eventual connect. CIDR notation is required
