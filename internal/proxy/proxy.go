@@ -63,9 +63,21 @@ type Proxy struct {
 	// allowlisted hostname onto a different port. Overridable in tests.
 	sniUpstreamPort string
 	ready           func() bool
+
+	downstreamReadHeaderTimeout time.Duration
+	downstreamReadTimeout       time.Duration
+	downstreamIdleTimeout       time.Duration
+	tunnelHandshakeTimeout      time.Duration
 }
 
 const notReadyMessage = "proxy is not ready: awaiting control-plane config"
+
+const (
+	defaultDownstreamReadHeaderTimeout = 10 * time.Second
+	defaultDownstreamReadTimeout       = 30 * time.Second
+	defaultDownstreamIdleTimeout       = 30 * time.Second
+	defaultTunnelHandshakeTimeout      = 10 * time.Second
+)
 
 // Options configures Proxy construction.
 type Options struct {
@@ -97,6 +109,12 @@ type Options struct {
 	// requests can never pass through un-transformed (leaking placeholder
 	// credentials upstream) during startup.
 	Ready func() bool
+	// Downstream timeouts bound unauthenticated client connections. Zero or
+	// negative values use finite defaults and cannot disable the boundary.
+	DownstreamReadHeaderTimeout time.Duration
+	DownstreamReadTimeout       time.Duration
+	DownstreamIdleTimeout       time.Duration
+	TunnelHandshakeTimeout      time.Duration
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -104,6 +122,18 @@ type Options struct {
 func New(opts Options) *Proxy {
 	if opts.TLSMode == "" {
 		opts.TLSMode = config.TLSModeMITM
+	}
+	if opts.DownstreamReadHeaderTimeout <= 0 {
+		opts.DownstreamReadHeaderTimeout = defaultDownstreamReadHeaderTimeout
+	}
+	if opts.DownstreamReadTimeout <= 0 {
+		opts.DownstreamReadTimeout = defaultDownstreamReadTimeout
+	}
+	if opts.DownstreamIdleTimeout <= 0 {
+		opts.DownstreamIdleTimeout = defaultDownstreamIdleTimeout
+	}
+	if opts.TunnelHandshakeTimeout <= 0 {
+		opts.TunnelHandshakeTimeout = defaultTunnelHandshakeTimeout
 	}
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	guard := opts.Guard
@@ -127,16 +157,27 @@ func New(opts Options) *Proxy {
 		logger:               opts.Logger,
 		shutdownCtx:          shutdownCtx,
 		shutdownCancel:       shutdownCancel,
+
+		downstreamReadHeaderTimeout: opts.DownstreamReadHeaderTimeout,
+		downstreamReadTimeout:       opts.DownstreamReadTimeout,
+		downstreamIdleTimeout:       opts.DownstreamIdleTimeout,
+		tunnelHandshakeTimeout:      opts.TunnelHandshakeTimeout,
 	}
 
 	p.httpServer = &http.Server{
-		Addr:    opts.HTTPAddr,
-		Handler: http.HandlerFunc(p.handleDirectHTTP),
+		Addr:              opts.HTTPAddr,
+		Handler:           http.HandlerFunc(p.handleDirectHTTP),
+		ReadHeaderTimeout: opts.DownstreamReadHeaderTimeout,
+		ReadTimeout:       opts.DownstreamReadTimeout,
+		IdleTimeout:       opts.DownstreamIdleTimeout,
 	}
 
 	p.httpsServer = &http.Server{
-		Addr:    opts.HTTPSAddr,
-		Handler: http.HandlerFunc(p.handleDirectHTTP),
+		Addr:              opts.HTTPSAddr,
+		Handler:           http.HandlerFunc(p.handleDirectHTTP),
+		ReadHeaderTimeout: opts.DownstreamReadHeaderTimeout,
+		ReadTimeout:       opts.DownstreamReadTimeout,
+		IdleTimeout:       opts.DownstreamIdleTimeout,
 		TLSConfig: &tls.Config{
 			GetCertificate: p.getCertificate,
 		},
@@ -780,7 +821,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 			&tls.Config{MinVersion: tls.VersionTLS12},
 		)
 	} else {
-		upstreamConn, err = dialer.DialContext(r.Context(), "tcp", upstreamHost)
+		upstreamConn, err = p.guard.DialContext(r.Context(), dialer, "tcp", upstreamHost)
 	}
 	if err != nil {
 		p.logger.Error("websocket upstream dial failed",
@@ -937,7 +978,6 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 		Resolver:  resolver,
-		Control:   guard.DialControl,
 	}
 	if responseHeaderTimeout <= 0 {
 		responseHeaderTimeout = config.DefaultUpstreamResponseHeaderTimeout
@@ -946,8 +986,10 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
-		Proxy:       proxyFunc,
-		DialContext: dialer.DialContext,
+		Proxy: proxyFunc,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return guard.DialContext(ctx, dialer, network, address)
+		},
 		// A custom DialContext disables net/http's automatic HTTP/2; opt back in
 		// so gRPC upstreams negotiate h2 over the same (dnsguard-controlled) dialer.
 		ForceAttemptHTTP2:     true,
