@@ -297,6 +297,24 @@ func notReadyResponse() *http.Response {
 	}
 }
 
+const transformErrorMessage = "proxy policy check unavailable"
+
+// transformErrorResponse answers a CONNECT whose transform pipeline failed, as
+// opposed to rejected: the proxy could not decide, so the client should retry
+// shortly rather than treat the destination as forbidden. The body names
+// neither the transform nor the error; those stay on the audit line.
+func transformErrorResponse() *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "503 " + http.StatusText(http.StatusServiceUnavailable),
+		Header: http.Header{
+			"Content-Type": []string{"text/plain; charset=utf-8"},
+			"Retry-After":  []string{"1"},
+		},
+		Body: io.NopCloser(strings.NewReader(transformErrorMessage + "\n")),
+	}
+}
+
 func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
 	p.handleHTTP(w, r, nil)
 }

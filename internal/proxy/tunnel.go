@@ -314,13 +314,13 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	rejectResp, err := pl.ProcessRequest(req.Context(), tctx, req, &result.RequestTransforms)
 	if err != nil {
 		result.Action = transform.ActionContinue
-		result.StatusCode = http.StatusBadGateway
+		result.StatusCode = http.StatusServiceUnavailable
 		result.Err = err
 		p.logger.Warn("tunnel transform error",
 			slog.String("target", target),
 			slog.String("error", err.Error()),
 		)
-		return false, nil, nil
+		return false, transformErrorResponse(), nil
 	}
 	if rejectResp != nil {
 		result.Action = transform.ShortCircuitAction(result.RequestTransforms)
