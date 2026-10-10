@@ -596,6 +596,9 @@ transforms:
       target: "localhost:9500"
       send_request_body: true
       send_response_body: true
+      # Deadline for each call to the server (default 15s). A call that exceeds
+      # it fails, and the proxy refuses the request rather than forwarding it.
+      timeout: "15s"
       # Only forward matching requests to this server (omit for all requests).
       rules:
         - host: "api.openai.com"
