@@ -82,10 +82,12 @@ type TransformContext struct {
 	Tunnel     *TunnelInfo
 
 	// BodyCapture is the side channel a body_capture transform uses to
-	// communicate captured request body bytes out of the pipeline. The proxy
-	// copies it onto PipelineResult after the request pipeline runs so the
-	// audit emitters can render a `body_capture` group with `request_body` /
-	// `request_body_truncated`. nil when no body_capture rule matched.
+	// communicate captured body bytes out of the pipeline. The proxy copies it
+	// onto PipelineResult after the request pipeline runs, and again after the
+	// response pipeline for a match that only produced a response capture, so
+	// the audit emitters can render a `body_capture` group with `request_body` /
+	// `request_body_truncated` / `response_body` / `response_body_truncated`.
+	// nil when no body_capture rule matched.
 	BodyCapture BodyCapture
 
 	// annotations is written by transforms via Annotate and read by the pipeline
@@ -149,13 +151,18 @@ type PipelineResult struct {
 	// internal/mcp.
 	MCP MCPAudit
 
-	// BodyCapture carries captured request body bytes from a body_capture
-	// transform when the request matched a configured rule. nil otherwise.
-	// Populated by the proxy by copying tctx.BodyCapture after the request
-	// pipeline runs; rendered by the audit functions as a `body_capture`
-	// group with `request_body` and `request_body_truncated`. The transform
-	// package treats the concrete type as opaque to avoid an import cycle
-	// with internal/transform/bodycapture.
+	// BodyCapture carries captured request (and, when enabled, response) body
+	// bytes from a body_capture transform when the request matched a configured
+	// rule. nil otherwise. Populated by the proxy by copying tctx.BodyCapture
+	// after the request pipeline runs; rendered by the audit functions as a
+	// `body_capture` group with `request_body`, `request_body_truncated` and,
+	// when response capture is enabled, `response_body` and
+	// `response_body_truncated`. The transform package treats the concrete type
+	// as opaque to avoid an import cycle with internal/transform/bodycapture.
+	//
+	// The response half is tee'd off the live stream, so it only holds its final
+	// value once the body has been written to the client. Read it in the audit
+	// callback, which fires after that, and not earlier.
 	BodyCapture BodyCapture
 
 	Err error
@@ -185,7 +192,14 @@ type MCPAudit interface {
 // renderers from the concrete struct in internal/transform/bodycapture so the
 // audit emitters can render captured bodies without an import cycle.
 //
-// This interface covers request bodies only.
+// The two halves are captured by different mechanisms. A request is already
+// fully in hand before it can go upstream, so it is buffered and copied. A
+// response is TEE'D (see BufferedBody.TeeTo) so a streaming reply is never
+// buffered before being forwarded. One consequence to keep in mind: the
+// response accessors only hold their final value once the response body has
+// been consumed, which is why the audit record is emitted after the body is
+// written to the client (the deferred finish in the proxy's HTTP handler)
+// rather than when the response pipeline returns.
 type BodyCapture interface {
 	// RequestBody returns the captured request body bytes (truncated to the
 	// transform's configured cap). Empty string when no rule matched the
@@ -194,6 +208,21 @@ type BodyCapture interface {
 	// RequestBodyTruncated reports whether the captured RequestBody was
 	// truncated to fit the transform's configured cap.
 	RequestBodyTruncated() bool
+	// ResponseBody returns the response body bytes tee'd off the stream as it
+	// was forwarded to the client - truncated to the transform's configured
+	// cap, and content-decoded when the reply was compressed. Empty string when
+	// response capture is not enabled, no rule matched, the response had no
+	// body, the body was never consumed, or its Content-Encoding is one the
+	// transform cannot decode.
+	//
+	// These are the raw bytes of the reply, never a parsed or merged view: an
+	// SSE reply comes back as its frames concatenated exactly as they went over
+	// the wire, because merging them is the consumer's job.
+	ResponseBody() string
+	// ResponseBodyTruncated reports whether the captured ResponseBody hit the
+	// transform's configured cap and lost its tail. Excess bytes are dropped as
+	// they stream past, so a truncated capture is never a stalled stream.
+	ResponseBodyTruncated() bool
 }
 
 // TransformTrace records what a single transform did.
