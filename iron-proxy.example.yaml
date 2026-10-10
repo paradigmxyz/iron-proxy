@@ -596,6 +596,9 @@ transforms:
       target: "localhost:9500"
       send_request_body: true
       send_response_body: true
+      # Restrict which request (and response) headers are sent to the server.
+      # Default: all. Same syntax as header_allowlist: literal names or /regex/.
+      # allowed_headers: ["Content-Type", "User-Agent", "/^X-Request-.*$/"]
       # Only forward matching requests to this server (omit for all requests).
       rules:
         - host: "api.openai.com"
