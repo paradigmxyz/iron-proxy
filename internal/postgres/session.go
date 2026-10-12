@@ -365,7 +365,7 @@ func (r *relay) clientToServer() {
 				// Unexpected mid-batch; treat the Simple Query as a fresh statement.
 				r.skipExtended = false
 			}
-			if allowed, reason := ClassifyClientStatement(m.String, r.upstream.PinnedGUCs()); !allowed {
+			if allowed, reason := ClassifyClientStatement(m.String, r.upstream.Role(), r.upstream.PinnedGUCs()); !allowed {
 				r.writeReject(reason, true)
 				continue
 			}
@@ -375,7 +375,7 @@ func (r *relay) clientToServer() {
 			}
 
 		case *pgproto3.Parse:
-			if allowed, reason := ClassifyClientStatement(m.Query, r.upstream.PinnedGUCs()); !allowed {
+			if allowed, reason := ClassifyClientStatement(m.Query, r.upstream.Role(), r.upstream.PinnedGUCs()); !allowed {
 				r.writeReject(reason, false)
 				r.skipExtended = true
 				continue

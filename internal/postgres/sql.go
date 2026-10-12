@@ -38,6 +38,10 @@ type Op struct {
 	// session variable — including the proxy-managed role and any pinned GUC.
 	ResetAll bool
 
+	// ResetAllNested marks RESET ALL inside another statement, such as a
+	// routine definition or ALTER ROLE, rather than direct session cleanup.
+	ResetAllNested bool
+
 	// Discard is true when the statement contains DISCARD ALL, which (among
 	// other things) resets every session variable like RESET ALL.
 	Discard bool
@@ -156,6 +160,7 @@ func classifyUncached(sql string) Op {
 		}
 		op.SetGUCs = append(op.SetGUCs, m.setGUCs...)
 		op.ResetAll = op.ResetAll || m.resetAll
+		op.ResetAllNested = op.ResetAllNested || (m.resetAll && root.GetVariableSetStmt() == nil)
 		op.Discard = op.Discard || m.discard
 	}
 	return op

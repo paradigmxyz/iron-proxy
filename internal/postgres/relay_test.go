@@ -240,3 +240,66 @@ func TestRelayPreservesUpstreamTransactionStateOnReject(t *testing.T) {
 		}
 	}
 }
+
+func TestRelayResetAllPolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		upstream Upstream
+		allowed  bool
+	}{
+		{name: "unmanaged", allowed: true},
+		{name: "role", upstream: Upstream{role: "reader"}},
+		{name: "pins", upstream: Upstream{pinnedGUCs: map[string]struct{}{"app.tenant": {}}}},
+		{name: "role and pins", upstream: Upstream{role: "reader", pinnedGUCs: map[string]struct{}{"app.tenant": {}}}},
+	}
+	protocols := []struct {
+		name    string
+		message pgproto3.FrontendMessage
+	}{
+		{name: "simple", message: &pgproto3.Query{String: "RESET ALL"}},
+		{name: "extended", message: &pgproto3.Parse{Query: "RESET ALL"}},
+	}
+	for _, tt := range tests {
+		for _, protocol := range protocols {
+			t.Run(tt.name+"/"+protocol.name, func(t *testing.T) {
+				client, relayClient := net.Pipe()
+				relayUpstream, upstream := net.Pipe()
+				for _, conn := range []net.Conn{client, relayClient, relayUpstream, upstream} {
+					t.Cleanup(func() { require.NoError(t, conn.Close()) })
+					require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+				}
+				r := newRelay(relayClient, relayUpstream, newClientBackend(relayClient),
+					pgproto3.NewFrontend(relayUpstream, relayUpstream), &tt.upstream,
+					slog.New(slog.NewTextHandler(io.Discard, nil)))
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					r.clientToServer()
+				}()
+				t.Cleanup(func() {
+					require.NoError(t, client.Close())
+					select {
+					case <-done:
+					case <-time.After(time.Second):
+						require.FailNow(t, "client-to-server relay did not stop")
+					}
+				})
+				clientProtocol := pgproto3.NewFrontend(client, client)
+				clientProtocol.Send(protocol.message)
+				require.NoError(t, clientProtocol.Flush())
+				if tt.allowed {
+					message, err := pgproto3.NewBackend(upstream, upstream).Receive()
+					require.NoError(t, err)
+					require.Equal(t, protocol.message, message)
+				} else {
+					message, err := clientProtocol.Receive()
+					require.NoError(t, err)
+					pgErr, ok := message.(*pgproto3.ErrorResponse)
+					require.True(t, ok)
+					require.Equal(t, "42501", pgErr.Code)
+					require.Contains(t, pgErr.Message, "RESET ALL")
+				}
+			})
+		}
+	}
+}

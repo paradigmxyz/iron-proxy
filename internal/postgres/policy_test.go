@@ -17,6 +17,7 @@ func TestClassifyClientStatement(t *testing.T) {
 	tests := []struct {
 		name    string
 		sql     string
+		role    string
 		pinned  map[string]struct{}
 		allowed bool
 		reason  RejectReason
@@ -35,9 +36,20 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "set session authorization rejected", sql: "SET SESSION AUTHORIZATION admin", reason: RejectClientRoleChange},
 		{name: "reset session authorization rejected", sql: "RESET SESSION AUTHORIZATION", reason: RejectClientRoleChange},
 
-		// RESET ALL / DISCARD ALL reset the managed role, so they are blocked
-		// even when the upstream pins no custom settings.
-		{name: "reset all rejected", sql: "RESET ALL", reason: RejectResetAll},
+		// Pool cleanup is allowed only when the proxy manages no session state.
+		{name: "alter role reset all rejected", sql: "ALTER ROLE other RESET ALL", reason: RejectResetAll},
+		{name: "alter database reset all rejected", sql: "ALTER DATABASE app RESET ALL", reason: RejectResetAll},
+		{name: "alter function reset all rejected", sql: "ALTER FUNCTION f() RESET ALL", reason: RejectResetAll},
+		{name: "reset all unmanaged allowed", sql: "RESET ALL", allowed: true},
+		{name: "reset all role rejected", sql: "RESET ALL", role: "reader", reason: RejectResetAll},
+		{name: "reset all role and pins rejected", sql: "RESET ALL", role: "reader", pinned: pinned, reason: RejectResetAll},
+		{name: "asyncpg pool reset allowed", sql: "SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;", allowed: true},
+		{name: "reset batch cannot change role", sql: "RESET ALL; SET ROLE other", reason: RejectClientRoleChange},
+		{name: "reset batch cannot call set_config", sql: "RESET ALL; SELECT set_config('role', 'other', false)", reason: RejectSetConfig},
+		{name: "reset batch cannot discard all", sql: "RESET ALL; DISCARD ALL", reason: RejectDiscardAll},
+		{name: "reset batch cannot define reset routine", sql: "RESET ALL; CREATE PROCEDURE p() LANGUAGE sql AS $$ RESET ALL $$", reason: RejectResetAll},
+		{name: "plpgsql procedure cannot reset settings", sql: "CREATE PROCEDURE p() LANGUAGE plpgsql AS $$ BEGIN RESET ALL; END $$", reason: RejectResetAll},
+		{name: "sql standard procedure cannot reset settings", sql: "CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC RESET ALL; END", reason: RejectResetAll},
 		{name: "discard all rejected", sql: "DISCARD ALL", reason: RejectDiscardAll},
 		{name: "discard plans allowed", sql: "DISCARD PLANS", allowed: true},
 		{name: "discard temp allowed", sql: "DISCARD TEMP", allowed: true},
@@ -140,7 +152,7 @@ func TestClassifyClientStatement(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allowed, reason := ClassifyClientStatement(tt.sql, tt.pinned)
+			allowed, reason := ClassifyClientStatement(tt.sql, tt.role, tt.pinned)
 			if tt.allowed {
 				require.Truef(t, allowed, "ClassifyClientStatement(%q) returned (false, %v); want allowed", tt.sql, reason)
 				return

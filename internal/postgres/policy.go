@@ -47,13 +47,14 @@ const (
 // ClassifyClientStatement inspects sql and returns whether the relay should
 // reject it before forwarding upstream. (reason == 0) means "allow". pinned is
 // the lowercased set of setting names this upstream forbids the client from
-// mutating; pass nil when the upstream pins nothing.
+// mutating; pass nil when the upstream pins nothing. role is the upstream
+// role injected by the proxy, or empty when none is configured.
 //
 // Beyond the role policy, the proxy rejects every set_config call, writes to
 // pg_settings (directly or via a client-defined view or rule), definitions that
 // bind functions as implicit callbacks (CREATE AGGREGATE and friends), any SET or RESET
-// of a pinned setting, and any RESET ALL / DISCARD ALL (which would reset the
-// managed role and every pinned setting at once).
+// of a pinned setting, and DISCARD ALL. RESET ALL is allowed only as direct session
+// cleanup when the upstream has neither a managed role nor pinned settings.
 //
 // Multi-statement Simple Queries are allowed when every statement passes;
 // Classify aggregates the batch, so a single offending statement anywhere
@@ -61,7 +62,7 @@ const (
 //
 // Used for both Simple Query bodies and the SQL string carried by Extended
 // Query Parse messages.
-func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bool, reason RejectReason) {
+func ClassifyClientStatement(sql, role string, pinned map[string]struct{}) (allowed bool, reason RejectReason) {
 	op := Classify(sql)
 	switch op.Kind {
 	case OpSetRole, OpSetSessionAuthorization, OpResetRole, OpResetSessionAuthorization:
@@ -80,9 +81,9 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 	case OpCallbackDefinition:
 		return false, RejectCallbackDefinition
 	}
-	// RESET ALL / DISCARD ALL reset the proxy-managed role regardless of which
-	// settings the upstream pins, so they are always rejected.
-	if op.ResetAll {
+	// Pool cleanup may reset unmanaged sessions. Nested resets (e.g. routine
+	// definitions or ALTER ROLE) must retain their existing denial.
+	if op.ResetAll && (role != "" || len(pinned) != 0 || op.ResetAllNested) {
 		return false, RejectResetAll
 	}
 	if op.Discard {

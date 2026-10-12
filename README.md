@@ -51,7 +51,9 @@ Single binary. Single YAML config.
   any `set_config` call, DO blocks, unsafe function definitions, definitions
   that bind functions as callbacks such as `CREATE AGGREGATE`, etc.) via a
   SQL AST walk. SQL and PL/pgSQL routine bodies are inspected recursively;
-  dynamic PL/pgSQL and unsupported routine languages are rejected. As defense
+  dynamic PL/pgSQL and unsupported routine languages are rejected. Pool cleanup
+  with standalone `RESET ALL` is allowed only when no role or session settings
+  are configured; nested resets and `DISCARD ALL` remain blocked. As defense
   in depth, revoke `EXECUTE` on `pg_catalog.set_config` and unneeded
   `TEMPORARY` / `CREATE` privileges from the injected role (e.g. from
   `PUBLIC`), granting `set_config` back only to the login user that the proxy
