@@ -221,7 +221,7 @@ func buildEntry(tc tokenEntryConfig, logger *slog.Logger, buildSource sourceBuil
 		return nil, nil, err
 	}
 
-	rules, err := hostmatch.CompileRules(tc.Rules, "rules")
+	rules, err := hostmatch.CompileRulesAllowRequireTLS(tc.Rules, "rules")
 	if err != nil {
 		return nil, nil, err
 	}

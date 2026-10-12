@@ -494,12 +494,16 @@ HTTPS). A plain-HTTP request then keeps its proxy token:
             require_tls: true
 ```
 
-`require_tls` is part of the shared rule format, so it works on the `rules` of
-every transform that has them (`aws_auth`, `gcp_auth`, `oauth_token`,
-`hmac_sign`, and so on), and on MCP policy and MCP gateway rules. It defaults
-to `false`. Use it on rules that inject a credential. On a rule that enforces
-a policy (`judge`, `header_allowlist`, ...) it has the opposite effect:
-plain-HTTP requests would no longer match, so they would skip the policy.
+`require_tls` defaults to `false`. It is accepted only where a rule not
+matching is safe:
+
+- the credential injectors: `secrets`, `aws_auth`, `gcp_auth`,
+  `gcp_id_token`, `oauth_token`, `hmac_sign`, and MCP gateway routes;
+- `allowlist`, where not matching means the request is denied.
+
+Everywhere else it is a config error. On a rule that enforces a policy
+(`judge`, `header_allowlist`, `grpc`, `body_capture`, `annotate`, MCP policy),
+plain-HTTP requests would stop matching and skip the policy.
 
 Secret sources:
 

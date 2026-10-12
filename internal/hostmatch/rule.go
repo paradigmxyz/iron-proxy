@@ -15,9 +15,9 @@ type RuleConfig struct {
 	// RequireTLS limits the rule to requests that arrived inside TLS (a
 	// MITM'd or direct HTTPS request). A plain-HTTP request never matches.
 	// Set it on rules that inject a credential, so the credential is never
-	// sent upstream in clear text. Do not set it on a rule that enforces a
-	// policy (judge, header_allowlist, ...): there it would let plain-HTTP
-	// requests skip the policy.
+	// sent upstream in clear text. Only callers that compile with
+	// CompileRulesAllowRequireTLS accept it; CompileRules rejects it, because
+	// on a policy rule it would let plain-HTTP requests skip the policy.
 	RequireTLS bool `yaml:"require_tls,omitempty"`
 }
 
@@ -55,9 +55,30 @@ func (r *Rule) Matches(host, method, path string) bool {
 	return true
 }
 
-// CompileRules compiles a list of RuleConfigs into Rules.
+// CompileRules compiles a list of RuleConfigs into Rules. It rejects
+// require_tls: on a rule that enforces a policy (judge, header_allowlist,
+// grpc, MCP policy, ...), a plain-HTTP request would stop matching and skip
+// the policy. Callers where not matching is safe use
+// CompileRulesAllowRequireTLS instead.
 // The prefix is used for error messages (e.g. "allowlist" or "grpc transform \"foo\"").
 func CompileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
+	for i, rc := range configs {
+		if rc.RequireTLS {
+			return nil, fmt.Errorf("%s: rules[%d]: require_tls is not supported here: it would let plain-HTTP requests skip this rule", prefix, i)
+		}
+	}
+	return compileRules(configs, prefix)
+}
+
+// CompileRulesAllowRequireTLS is CompileRules for callers where a rule not
+// matching is safe: a credential injector (no match means no credential is
+// added) or a fail-closed gate like allowlist (no match means denied). Only
+// those callers may accept require_tls.
+func CompileRulesAllowRequireTLS(configs []RuleConfig, prefix string) ([]Rule, error) {
+	return compileRules(configs, prefix)
+}
+
+func compileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
 	var rules []Rule
 	for i, rc := range configs {
 		if rc.Host != "" && rc.CIDR != "" {

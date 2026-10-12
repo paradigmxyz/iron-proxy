@@ -61,7 +61,7 @@ func newFromConfig(cfg allowlistConfig) (*Allowlist, error) {
 	}
 
 	// Explicit rules with optional method/path restrictions.
-	compiled, err := hostmatch.CompileRules(cfg.Rules, "allowlist")
+	compiled, err := hostmatch.CompileRulesAllowRequireTLS(cfg.Rules, "allowlist")
 	if err != nil {
 		return nil, err
 	}

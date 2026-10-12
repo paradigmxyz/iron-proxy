@@ -40,7 +40,7 @@ func TestRequireTLS_Matching(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rules, err := CompileRules(tc.rules, "test")
+			rules, err := CompileRulesAllowRequireTLS(tc.rules, "test")
 			require.NoError(t, err)
 			req := httptest.NewRequest(tc.method, tc.url, nil)
 			require.Equal(t, tc.want, MatchAnyRule(rules, req))
@@ -59,7 +59,38 @@ func TestRequireTLS_DecodesFromYAMLKey(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal([]byte("host: api.example.com\nrequire_tls: true\n"), &rc))
 	require.True(t, rc.RequireTLS)
 
-	rules, err := CompileRules([]RuleConfig{rc}, "test")
+	rules, err := CompileRulesAllowRequireTLS([]RuleConfig{rc}, "test")
 	require.NoError(t, err)
-	require.True(t, rules[0].RequireTLS, "CompileRules must carry require_tls onto the compiled rule")
+	require.True(t, rules[0].RequireTLS, "require_tls must be carried onto the compiled rule")
+}
+
+// require_tls is opt-in per caller. CompileRules (policy rules) rejects it,
+// because a plain-HTTP request would stop matching and skip the policy.
+// CompileRulesAllowRequireTLS (credential injectors, fail-closed gates)
+// accepts it.
+func TestRequireTLS_OnlyOptInCallersAcceptIt(t *testing.T) {
+	cases := []struct {
+		name    string
+		compile func([]RuleConfig, string) ([]Rule, error)
+		rules   []RuleConfig
+		wantErr string
+	}{
+		{name: "CompileRules rejects require_tls", compile: CompileRules, rules: []RuleConfig{{Host: "a.example.com", RequireTLS: true}}, wantErr: "test: rules[0]: require_tls is not supported here"},
+		{name: "CompileRules rejects it on any rule in the list", compile: CompileRules, rules: []RuleConfig{{Host: "a.example.com"}, {Host: "b.example.com", RequireTLS: true}}, wantErr: "test: rules[1]: require_tls is not supported here"},
+		{name: "CompileRules accepts rules without it", compile: CompileRules, rules: []RuleConfig{{Host: "a.example.com"}}},
+		{name: "CompileRulesAllowRequireTLS accepts it", compile: CompileRulesAllowRequireTLS, rules: []RuleConfig{{Host: "a.example.com", RequireTLS: true}}},
+		{name: "CompileRulesAllowRequireTLS still validates rules", compile: CompileRulesAllowRequireTLS, rules: []RuleConfig{{RequireTLS: true}}, wantErr: "one of host or cidr is required"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := tc.compile(tc.rules, "test")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			require.Contains(t, err.Error(), tc.wantErr)
+		})
+	}
 }

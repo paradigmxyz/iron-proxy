@@ -106,7 +106,7 @@ func Compile(c Config) (*Gateway, error) {
 		if len(rc.Rules) == 0 {
 			return nil, fmt.Errorf("mcp_gateway.routes[%q]: at least one rule is required", rc.Name)
 		}
-		rules, err := hostmatch.CompileRules(rc.Rules, fmt.Sprintf("mcp_gateway.routes[%q]", rc.Name))
+		rules, err := hostmatch.CompileRulesAllowRequireTLS(rc.Rules, fmt.Sprintf("mcp_gateway.routes[%q]", rc.Name))
 		if err != nil {
 			return nil, err
 		}

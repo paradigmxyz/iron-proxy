@@ -195,9 +195,10 @@ func (p *Policy) MatchServer(req *http.Request) *Server {
 	if p == nil {
 		return nil
 	}
+	host := hostmatch.StripPort(req.Host)
 	for _, s := range p.servers {
 		for _, r := range s.rules {
-			if r.MatchesRequest(req) {
+			if r.Matches(host, req.Method, req.URL.Path) {
 				return s
 			}
 		}

@@ -95,7 +95,7 @@ func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte,
 	if c.Audience == "" {
 		return nil, fmt.Errorf("gcp_id_token: \"audience\" is required")
 	}
-	rules, err := hostmatch.CompileRules(c.Rules, "gcp_id_token")
+	rules, err := hostmatch.CompileRulesAllowRequireTLS(c.Rules, "gcp_id_token")
 	if err != nil {
 		return nil, err
 	}
