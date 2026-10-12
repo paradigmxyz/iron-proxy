@@ -168,6 +168,9 @@ func sendAbsoluteFormHTTP(t *testing.T, tunnelAddr string) string {
 	return string(body)
 }
 
+// With require_tls on, only the HTTPS request gets the real secret. With it
+// off (the control rows), plain HTTP gets it too: that is the #278
+// behaviour, and it shows this test can tell the difference.
 func TestIntegration_RequireTLS_SecretsInjectOnlyInsideTLS(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
@@ -176,31 +179,52 @@ func TestIntegration_RequireTLS_SecretsInjectOnlyInsideTLS(t *testing.T) {
 	defer tlsUpstream.Close()
 	plainUpstream := httptest.NewServer(echoAuthHandler)
 	defer plainUpstream.Close()
+	tlsAddr := tlsUpstream.Listener.Addr().String()
+	plainAddr := plainUpstream.Listener.Addr().String()
 
-	tunnelAddr, caPool := startRequireTLSProxy(t, true, tlsUpstream.Listener.Addr().String(), plainUpstream.Listener.Addr().String())
-
-	t.Run("https via CONNECT gets the real secret", func(t *testing.T) {
-		require.Equal(t, "Bearer "+requireTLSRealSecret, sendViaCONNECT(t, tunnelAddr, caPool, 443, true))
-	})
-	t.Run("plain http via CONNECT keeps the placeholder", func(t *testing.T) {
-		require.Equal(t, "Bearer "+requireTLSPlaceholder, sendViaCONNECT(t, tunnelAddr, caPool, 80, false))
-	})
-	t.Run("absolute-form http keeps the placeholder", func(t *testing.T) {
-		require.Equal(t, "Bearer "+requireTLSPlaceholder, sendAbsoluteFormHTTP(t, tunnelAddr))
-	})
-}
-
-// Control: without require_tls the same config injects on plain HTTP too.
-// This is the #278 behaviour, and it shows the test above can detect it.
-func TestIntegration_RequireTLS_OffStillInjectsOnPlainHTTP(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
+	type proxyUnderTest struct {
+		tunnelAddr string
+		caPool     *x509.CertPool
 	}
-	tlsUpstream := httptest.NewTLSServer(echoAuthHandler)
-	defer tlsUpstream.Close()
-	plainUpstream := httptest.NewServer(echoAuthHandler)
-	defer plainUpstream.Close()
+	proxies := map[bool]proxyUnderTest{}
+	for _, requireTLS := range []bool{true, false} {
+		tunnelAddr, caPool := startRequireTLSProxy(t, requireTLS, tlsAddr, plainAddr)
+		proxies[requireTLS] = proxyUnderTest{tunnelAddr: tunnelAddr, caPool: caPool}
+	}
 
-	tunnelAddr, _ := startRequireTLSProxy(t, false, tlsUpstream.Listener.Addr().String(), plainUpstream.Listener.Addr().String())
-	require.Equal(t, "Bearer "+requireTLSRealSecret, sendAbsoluteFormHTTP(t, tunnelAddr))
+	const (
+		httpsViaCONNECT = "https via CONNECT"
+		httpViaCONNECT  = "plain http via CONNECT"
+		absoluteForm    = "absolute-form http"
+	)
+	cases := []struct {
+		name       string
+		requireTLS bool
+		send       string
+		want       string
+	}{
+		{name: "require_tls: https via CONNECT gets the real secret", requireTLS: true, send: httpsViaCONNECT, want: requireTLSRealSecret},
+		{name: "require_tls: plain http via CONNECT keeps the placeholder", requireTLS: true, send: httpViaCONNECT, want: requireTLSPlaceholder},
+		{name: "require_tls: absolute-form http keeps the placeholder", requireTLS: true, send: absoluteForm, want: requireTLSPlaceholder},
+		{name: "control, off: https via CONNECT gets the real secret", requireTLS: false, send: httpsViaCONNECT, want: requireTLSRealSecret},
+		{name: "control, off: absolute-form http gets the real secret", requireTLS: false, send: absoluteForm, want: requireTLSRealSecret},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			px := proxies[tc.requireTLS]
+			var got string
+			switch tc.send {
+			case httpsViaCONNECT:
+				got = sendViaCONNECT(t, px.tunnelAddr, px.caPool, 443, true)
+			case httpViaCONNECT:
+				got = sendViaCONNECT(t, px.tunnelAddr, px.caPool, 80, false)
+			case absoluteForm:
+				got = sendAbsoluteFormHTTP(t, px.tunnelAddr)
+			default:
+				t.Fatalf("unknown send mode %q", tc.send)
+			}
+			require.Equal(t, "Bearer "+tc.want, got)
+		})
+	}
 }
