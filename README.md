@@ -474,6 +474,33 @@ values before forwarding upstream. You control where it looks:
 
 Query parameters are always scanned.
 
+**Keeping secrets off plain HTTP.** Plain HTTP can reach a transform: the HTTP
+listener always starts, and the tunnel listener accepts absolute-form
+`http://` requests. Without a guard, a matching plain-HTTP request gets the
+real secret and sends it upstream in clear text. Set `require_tls: true` on a
+rule to make it match only requests that arrived inside TLS (MITM'd or direct
+HTTPS). A plain-HTTP request then keeps its proxy token:
+
+```yaml
+- name: secrets
+  config:
+    secrets:
+      - source: {type: env, var: OPENAI_API_KEY}
+        replace:
+          proxy_value: proxy-openai-abc123
+          match_headers: [Authorization]
+        rules:
+          - host: api.openai.com
+            require_tls: true
+```
+
+`require_tls` is part of the shared rule format, so it works on the `rules` of
+every transform that has them (`aws_auth`, `gcp_auth`, `oauth_token`,
+`hmac_sign`, and so on), and on MCP policy and MCP gateway rules. It defaults
+to `false`. Use it on rules that inject a credential. On a rule that enforces
+a policy (`judge`, `header_allowlist`, ...) it has the opposite effect:
+plain-HTTP requests would no longer match, so they would skip the policy.
+
 Secret sources:
 
 - **`env`:** reads `var` from the proxy process environment. Fixed at process

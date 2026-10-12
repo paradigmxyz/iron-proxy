@@ -12,16 +12,36 @@ type RuleConfig struct {
 	CIDR    string   `yaml:"cidr,omitempty"`
 	Methods []string `yaml:"methods,omitempty"`
 	Paths   []string `yaml:"paths,omitempty"`
+	// RequireTLS limits the rule to requests that arrived inside TLS (a
+	// MITM'd or direct HTTPS request). A plain-HTTP request never matches.
+	// Set it on rules that inject a credential, so the credential is never
+	// sent upstream in clear text. Do not set it on a rule that enforces a
+	// policy (judge, header_allowlist, ...): there it would let plain-HTTP
+	// requests skip the policy.
+	RequireTLS bool `yaml:"require_tls,omitempty"`
 }
 
 // Rule is a compiled matching rule ready for use.
 type Rule struct {
-	Matcher *Matcher
-	Methods map[string]bool // nil = all methods
-	Paths   []string        // nil = all paths
+	Matcher    *Matcher
+	Methods    map[string]bool // nil = all methods
+	Paths      []string        // nil = all paths
+	RequireTLS bool            // true = plain-HTTP requests never match
 }
 
-// Matches returns true if the request matches this rule.
+// MatchesRequest returns true if req matches this rule, including the
+// require_tls condition. Prefer it over Matches whenever the request is at
+// hand.
+func (r *Rule) MatchesRequest(req *http.Request) bool {
+	if r.RequireTLS && req.TLS == nil {
+		return false
+	}
+	return r.Matches(StripPort(req.Host), req.Method, req.URL.Path)
+}
+
+// Matches returns true if host, method and path match this rule. It cannot
+// see the connection, so it does not apply require_tls: use MatchesRequest
+// for real requests.
 func (r *Rule) Matches(host, method, path string) bool {
 	if !r.Matcher.Matches(host) {
 		return false
@@ -66,7 +86,7 @@ func CompileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
 			}
 		}
 
-		r := Rule{Matcher: m}
+		r := Rule{Matcher: m, RequireTLS: rc.RequireTLS}
 		if !isWildcard(rc.Methods) {
 			r.Methods = make(map[string]bool, len(rc.Methods))
 			for _, method := range rc.Methods {
@@ -88,9 +108,8 @@ func isWildcard(methods []string) bool {
 
 // MatchAnyRule returns true if the request matches any rule in the list.
 func MatchAnyRule(rules []Rule, req *http.Request) bool {
-	host := StripPort(req.Host)
 	for _, r := range rules {
-		if r.Matches(host, req.Method, req.URL.Path) {
+		if r.MatchesRequest(req) {
 			return true
 		}
 	}
