@@ -9,7 +9,8 @@
 // Credentials come from one of two sources, mutually exclusive:
 //   - access_key_id + secret_access_key: each backed by any registered secret
 //     source (env, aws_sm, aws_ssm, 1password, ...). Best for calling AWS
-//     from outside AWS with long-lived static keys.
+//     from outside AWS with long-lived static keys. An optional session_token,
+//     backed the same way, carries temporary (STS) credentials.
 //   - credentials_provider: a structured block dispatching on a type field.
 //     The "workload_identity" type defers to the AWS SDK default credential
 //     chain, which natively resolves IRSA, EKS Pod Identity, IMDSv2, env
@@ -66,6 +67,7 @@ const (
 type config struct {
 	AccessKeyID         yaml.Node              `yaml:"access_key_id,omitempty"`
 	SecretAccessKey     yaml.Node              `yaml:"secret_access_key,omitempty"`
+	SessionToken        yaml.Node              `yaml:"session_token,omitempty"`
 	CredentialsProvider yaml.Node              `yaml:"credentials_provider,omitempty"`
 	AllowedRegions      []string               `yaml:"allowed_regions,omitempty"`
 	AllowedServices     []string               `yaml:"allowed_services,omitempty"`
@@ -120,7 +122,7 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 }
 
 func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCreds credentialsProviderBuilder) (*AWSAuth, error) {
-	hasStatic := !c.AccessKeyID.IsZero() || !c.SecretAccessKey.IsZero()
+	hasStatic := !c.AccessKeyID.IsZero() || !c.SecretAccessKey.IsZero() || !c.SessionToken.IsZero()
 	hasProvider := !c.CredentialsProvider.IsZero()
 	if hasStatic && hasProvider {
 		return nil, fmt.Errorf("aws_auth: set either access_key_id/secret_access_key or credentials_provider, not both")
@@ -151,7 +153,14 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 		if err != nil {
 			return nil, fmt.Errorf("aws_auth: building secret_access_key source: %w", err)
 		}
-		creds = &staticSourceProvider{accessKey: accessKey, secretKey: secretKey}
+		var sessionToken secrets.Source
+		if !c.SessionToken.IsZero() {
+			sessionToken, err = build(c.SessionToken, logger)
+			if err != nil {
+				return nil, fmt.Errorf("aws_auth: building session_token source: %w", err)
+			}
+		}
+		creds = &staticSourceProvider{accessKey: accessKey, secretKey: secretKey, sessionToken: sessionToken}
 	}
 
 	rules, err := hostmatch.CompileRules(c.Rules, "aws_auth")
@@ -178,11 +187,13 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 	}, nil
 }
 
-// staticSourceProvider adapts two secrets.Source values into an
-// aws.CredentialsProvider. The sources do their own TTL caching.
+// staticSourceProvider adapts secrets.Source values into an
+// aws.CredentialsProvider. The sources do their own TTL caching. sessionToken
+// is optional and set only for temporary (STS) credentials.
 type staticSourceProvider struct {
-	accessKey secrets.Source
-	secretKey secrets.Source
+	accessKey    secrets.Source
+	secretKey    secrets.Source
+	sessionToken secrets.Source
 }
 
 func (p *staticSourceProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
@@ -194,9 +205,17 @@ func (p *staticSourceProvider) Retrieve(ctx context.Context) (aws.Credentials, e
 	if err != nil {
 		return aws.Credentials{}, fmt.Errorf("secret_access_key: %w", err)
 	}
+	var st string
+	if p.sessionToken != nil {
+		st, err = p.sessionToken.Get(ctx)
+		if err != nil {
+			return aws.Credentials{}, fmt.Errorf("session_token: %w", err)
+		}
+	}
 	return aws.Credentials{
 		AccessKeyID:     ak,
 		SecretAccessKey: sk,
+		SessionToken:    st,
 		Source:          "iron-proxy aws_auth static",
 	}, nil
 }
