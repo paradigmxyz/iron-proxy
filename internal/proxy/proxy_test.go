@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,8 @@ import (
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	_ "github.com/ironsh/iron-proxy/internal/transform/jsonrpc"
+	_ "github.com/ironsh/iron-proxy/internal/transform/requestpolicy"
 )
 
 func testLogger() *slog.Logger {
@@ -140,6 +143,80 @@ func startProxyWithTransforms(t *testing.T, transforms []transform.Transformer) 
 	return p, httpAddr, httpsAddr, pool
 }
 
+func startProxyWithDeadlines(t *testing.T, timeout time.Duration) (*Proxy, string, string) {
+	t.Helper()
+	caCert, caKey := generateTestCA(t)
+	cache, err := certcache.NewFromCA(caCert, caKey, 100, 72*time.Hour)
+	require.NoError(t, err)
+	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
+	p := New(Options{
+		HTTPAddr:                    "127.0.0.1:0",
+		HTTPSAddr:                   "127.0.0.1:0",
+		CertCache:                   cache,
+		Pipeline:                    transform.NewPipelineHolder(pipeline),
+		Logger:                      testLogger(),
+		DownstreamReadHeaderTimeout: timeout,
+		DownstreamReadTimeout:       timeout,
+		DownstreamIdleTimeout:       timeout,
+		TunnelHandshakeTimeout:      timeout,
+	})
+	httpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tlsLn := tls.NewListener(httpsLn, p.httpsServer.TLSConfig)
+	go func() { _ = p.httpServer.Serve(httpLn) }()
+	go func() { _ = p.httpsServer.Serve(tlsLn) }()
+	t.Cleanup(func() {
+		_ = p.httpServer.Close()
+		_ = p.httpsServer.Close()
+	})
+	return p, httpLn.Addr().String(), httpsLn.Addr().String()
+}
+
+func requirePeerCloses(t *testing.T, conn net.Conn) {
+	t.Helper()
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	buffer := make([]byte, 4096)
+	for {
+		_, err := conn.Read(buffer)
+		if err == nil {
+			continue
+		}
+		var networkError net.Error
+		if errors.As(err, &networkError) {
+			require.False(t, networkError.Timeout(), "peer did not enforce its deadline")
+		}
+		return
+	}
+}
+
+func TestProxyStalledDirectConnectionsExpire(t *testing.T) {
+	const timeout = 150 * time.Millisecond
+	_, httpAddr, httpsAddr := startProxyWithDeadlines(t, timeout)
+
+	tests := []struct {
+		name, address string
+		payload       string
+	}{
+		{"http partial header", httpAddr, "GET http://example.com/ HTTP/1.1\r\nHost: example.com"},
+		{"http partial body", httpAddr, "POST http://example.com/ HTTP/1.1\r\nHost: example.com\r\nContent-Length: 100\r\n\r\nx"},
+		{"tls handshake", httpsAddr, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", tc.address, time.Second)
+			require.NoError(t, err)
+			defer conn.Close()
+			if tc.payload != "" {
+				_, err = io.WriteString(conn, tc.payload)
+				require.NoError(t, err)
+			}
+			requirePeerCloses(t, conn)
+		})
+	}
+}
+
 func startHTTPProxyWithMCP(t *testing.T, policy *mcp.Policy, gateway *mcpgateway.Gateway) (*Proxy, string) {
 	t.Helper()
 	pipeline := transform.NewPipeline(nil, transform.BodyLimits{}, testLogger())
@@ -220,6 +297,81 @@ func TestHTTPProxy_PostBody(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, "echo: request body", string(body))
+}
+
+func TestHTTPProxy_EgressPoliciesRejectBeforeUpstream(t *testing.T) {
+	var upstreamHits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	require.NoError(t, err)
+	host, port, err := net.SplitHostPort(upstreamURL.Host)
+	require.NoError(t, err)
+
+	allow, err := transform.Lookup("allowlist")
+	require.NoError(t, err)
+	requestPolicy, err := transform.Lookup("request_policy")
+	require.NoError(t, err)
+	jsonRPC, err := transform.Lookup("json_rpc")
+	require.NoError(t, err)
+	allowTransform, err := allow(mustYAMLNode(t, fmt.Sprintf("domains: [%q]", host)), testLogger())
+	require.NoError(t, err)
+	requestTransform, err := requestPolicy(mustYAMLNode(t, fmt.Sprintf(`rules:
+  - host: %q
+    port: %q
+    path: /artifact
+    http_methods: [GET, HEAD]
+    require_empty_body: true
+    query: {mode: empty}
+  - host: %q
+    port: %q
+    path: /rpc
+    http_methods: [POST]
+    query: {mode: empty}
+`, host, port, host, port)), testLogger())
+	require.NoError(t, err)
+	rpcTransform, err := jsonRPC(mustYAMLNode(t, fmt.Sprintf(`rules:
+  - host: %q
+    port: %q
+    path: /rpc
+    http_methods: [POST]
+    allowed_methods: [eth_call]
+`, host, port)), testLogger())
+	require.NoError(t, err)
+
+	_, proxyAddr, _, _ := startProxyWithTransforms(t, []transform.Transformer{allowTransform, requestTransform, rpcTransform})
+	client := &http.Client{Transport: &http.Transport{Proxy: func(*http.Request) (*url.URL, error) {
+		return url.Parse("http://" + proxyAddr)
+	}}}
+	do := func(method, path, body string) int {
+		t.Helper()
+		req, requestErr := http.NewRequest(method, upstream.URL+path, strings.NewReader(body))
+		require.NoError(t, requestErr)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, requestErr := client.Do(req)
+		require.NoError(t, requestErr)
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	cases := []struct{ name, method, path, body string }{
+		{"query rejected", http.MethodGet, "/artifact?extra=value", ""},
+		{"body rejected", http.MethodGet, "/artifact", "data"},
+		{"RPC method rejected", http.MethodPost, "/rpc", `{"jsonrpc":"2.0","id":1,"method":"notAllowed","params":[]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, http.StatusForbidden, do(tc.method, tc.path, tc.body))
+		})
+	}
+	require.Zero(t, upstreamHits.Load(), "denied requests must never reach the mock upstream")
+	require.Equal(t, http.StatusOK, do(http.MethodPost, "/rpc", `{"jsonrpc":"2.0","id":1,"method":"eth_call","params":[]}`))
+	require.Equal(t, int64(1), upstreamHits.Load())
 }
 
 func TestMCPGatewayRoutesAllowedCallWithCredential(t *testing.T) {

@@ -1,8 +1,11 @@
 package dnsguard
 
 import (
+	"context"
+	"net"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -178,7 +181,73 @@ func TestDialControl_EmptyGuardNoop(t *testing.T) {
 	require.NoError(t, g.DialControl("tcp", "127.0.0.1:443", nil))
 }
 
+func TestDialContextRejectsDeniedAddressAfterHostnameResolution(t *testing.T) {
+	g, err := New([]string{"127.0.0.0/8", "::1/128"})
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	connection, err := g.DialContext(
+		ctx,
+		&net.Dialer{Timeout: time.Second},
+		"tcp",
+		"localhost:443",
+	)
+	if connection != nil {
+		_ = connection.Close()
+	}
+	require.Error(t, err)
+	require.True(t, IsDenyError(err), "resolved loopback must fail at the dial guard")
+}
+
 func TestDialControl_NilGuardNoop(t *testing.T) {
 	var g *Guard
 	require.NoError(t, g.DialControl("tcp", "127.0.0.1:443", nil))
+}
+
+func TestPrivateException_IsExactHostnameAndAddress(t *testing.T) {
+	g, err := NewWithExceptions(
+		[]string{"10.0.0.0/8", "169.254.0.0/16"},
+		map[string][]string{"managed-rpc": {"10.23.4.5/32"}},
+	)
+	require.NoError(t, err)
+
+	cases := []struct {
+		name, host, address string
+		allow               bool
+	}{
+		{"exact match", "managed-rpc", "10.23.4.5:8899", true},
+		{"canonical hostname", "MANAGED-RPC.", "10.23.4.5:8899", true},
+		{"wrong address", "managed-rpc", "10.23.4.6:8899", false},
+		{"wrong host", "other-rpc", "10.23.4.5:8899", false},
+		{"literal IP", "10.23.4.5", "10.23.4.5:8899", false},
+		{"metadata address", "managed-rpc", "169.254.169.254:80", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.allow, g.dialControlForHost(tc.host, tc.address) == nil)
+		})
+	}
+	// The compatibility hook has no original hostname and therefore never
+	// applies private exceptions.
+	require.Error(t, g.DialControl("tcp", "10.23.4.5:8899", nil))
+}
+
+func TestPrivateException_RejectsUnsafeConfiguration(t *testing.T) {
+	cases := []struct{ name, host, prefix string }{
+		{"empty host", "", "10.0.0.2/32"},
+		{"wildcard", "*.example", "10.0.0.2/32"},
+		{"literal IP", "10.0.0.1", "10.0.0.2/32"},
+		{"port in host", "rpc:8899", "10.0.0.2/32"},
+		{"invalid host", "-rpc", "10.0.0.2/32"},
+		{"missing prefix", "managed-rpc", "10.0.0.2"},
+		{"broad IPv4 prefix", "managed-rpc", "10.0.0.0/8"},
+		{"broad IPv6 prefix", "managed-rpc", "2001:db8::/64"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewWithExceptions(nil, map[string][]string{tc.host: {tc.prefix}})
+			require.Error(t, err)
+		})
+	}
 }
