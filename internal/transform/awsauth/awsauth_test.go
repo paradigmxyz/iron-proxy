@@ -192,6 +192,60 @@ rules:
 		require.ErrorContains(t, err, "not both")
 	})
 
+	t.Run("session_token is part of the static path", func(t *testing.T) {
+		withToken := map[string]secrets.Source{
+			"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "ASIA"},
+			"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "shh"},
+			"AWS_SESSION_TOKEN":     &staticSource{name: "token", value: "tok"},
+		}
+		cases := []struct {
+			name    string
+			yaml    string
+			wantErr string
+		}{
+			{
+				name: "token without keys",
+				yaml: `
+session_token: {type: env, var: AWS_SESSION_TOKEN}
+rules:
+  - host: "*.amazonaws.com"
+`,
+				wantErr: "access_key_id is required",
+			},
+			{
+				name: "token with credentials_provider",
+				yaml: `
+session_token: {type: env, var: AWS_SESSION_TOKEN}
+credentials_provider:
+  type: workload_identity
+rules:
+  - host: "*.amazonaws.com"
+`,
+				wantErr: "not both",
+			},
+			{
+				name: "token source that cannot be built",
+				yaml: `
+access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
+secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
+session_token:     {type: env, var: NOT_A_TEST_SOURCE}
+rules:
+  - host: "*.amazonaws.com"
+`,
+				wantErr: "building session_token source",
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var c config
+				node := yamlFromString(t, tc.yaml)
+				require.NoError(t, node.Decode(&c))
+				_, err := newFromConfig(c, slog.Default(), mapBuilder(withToken), errCredBuilder)
+				require.ErrorContains(t, err, tc.wantErr)
+			})
+		}
+	})
+
 	t.Run("rejects neither static nor credentials_provider", func(t *testing.T) {
 		var c config
 		node := yamlFromString(t, `
@@ -363,6 +417,29 @@ rules:
 		require.Equal(t, int64(1), stub.calls.Load())
 	})
 
+	t.Run("static session_token populates security-token header", func(t *testing.T) {
+		withToken := map[string]secrets.Source{
+			"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "ASIAEXAMPLE"},
+			"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+			"AWS_SESSION_TOKEN":     &staticSource{name: "token", value: "IQoJb3JpZ2luX2VjE..."},
+		}
+		a := buildTransformWith(t, `
+access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
+secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
+session_token:     {type: env, var: AWS_SESSION_TOKEN}
+rules:
+  - host: "*.amazonaws.com"
+`, mapBuilder(withToken))
+		require.Equal(t, "static", a.credsKind())
+
+		req := signedRequest(t, http.MethodGet, "https://bucket.s3.us-east-1.amazonaws.com/key", "us-east-1", "s3", nil, 1<<20)
+		_, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, "IQoJb3JpZ2luX2VjE...", req.Header.Get("X-Amz-Security-Token"))
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=ASIAEXAMPLE/")
+		require.Contains(t, req.Header.Get("Authorization"), "x-amz-security-token")
+	})
+
 	t.Run("placeholder signature is stripped before re-signing", func(t *testing.T) {
 		a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
 		req := signedRequest(t, http.MethodPost, "https://bedrock-runtime.us-east-1.amazonaws.com/x", "us-east-1", "bedrock", []byte("{}"), 1<<20)
@@ -517,4 +594,35 @@ rules:
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
+}
+
+func TestStaticSourceProviderRetrieve(t *testing.T) {
+	cases := []struct {
+		name      string
+		token     secrets.Source
+		wantToken string
+		wantErr   string
+	}{
+		{name: "no session token", token: nil, wantToken: ""},
+		{name: "session token", token: &staticSource{name: "token", value: "tok"}, wantToken: "tok"},
+		{name: "session token error", token: &staticSource{name: "token", err: fmt.Errorf("boom")}, wantErr: "session_token: boom"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &staticSourceProvider{
+				accessKey:    &staticSource{name: "access", value: "ASIA"},
+				secretKey:    &staticSource{name: "secret", value: "shh"},
+				sessionToken: tc.token,
+			}
+			creds, err := p.Retrieve(context.Background())
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, "ASIA", creds.AccessKeyID)
+			require.Equal(t, "shh", creds.SecretAccessKey)
+			require.Equal(t, tc.wantToken, creds.SessionToken)
+		})
+	}
 }
