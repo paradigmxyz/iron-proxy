@@ -59,9 +59,11 @@ func (e *tokenEntry) tokenSourceFor(ctx context.Context) (oauth2.TokenSource, er
 	if e.tokenSource != nil && fingerprint == e.fingerprint {
 		return e.tokenSource, nil
 	}
-	tsCtx := ctx
+	// The token source is cached and refreshes during later requests, so it
+	// keeps this request's values but not its cancellation.
+	tsCtx := context.WithoutCancel(ctx)
 	if len(headers) > 0 {
-		tsCtx = context.WithValue(ctx, oauth2.HTTPClient, newHeaderInjectingClient(headers))
+		tsCtx = context.WithValue(tsCtx, oauth2.HTTPClient, newHeaderInjectingClient(headers))
 	}
 	ts, err := buildTokenSource(tsCtx, e.grant, vals, e.scopes, e.cfgEndpoint, e.audience)
 	if err != nil {
