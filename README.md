@@ -470,12 +470,9 @@ values before forwarding upstream. You control where it looks:
 - **`require`:** when `true`, requests to a matching host that do **not** contain
   the proxy token are rejected with 403. This prevents a compromised workload
   from bypassing the secret-swap mechanism with alternative credentials. Default: `false`.
-- **`selection_group`:** entries with the same value are alternative credentials.
-  Each matching group requires exactly one entry's proxy token, as the full
-  header value or `Bearer <token>`; otherwise the request is rejected with 403.
-  Set this on the secret entry alongside a header-only `replace` with explicit
-  `match_headers` and `require: true`. Matching entries outside the group cannot
-  target the same headers.
+- **`selection_group`:** give credentials the same group name to let requests
+  choose between them. A request must select exactly one credential per group
+  by sending its `replace.proxy_value` token.
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.
