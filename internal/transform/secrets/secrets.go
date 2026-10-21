@@ -578,6 +578,8 @@ func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret, realValue str
 	}
 
 	if !bytes.Contains(data, []byte(sec.proxyValue)) {
+		// Put the body back so the next body-matching secret can read it.
+		req.Body = transform.NewBufferedBodyFromBytes(data)
 		return ""
 	}
 
