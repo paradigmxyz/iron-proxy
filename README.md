@@ -470,41 +470,15 @@ values before forwarding upstream. You control where it looks:
 - **`require`:** when `true`, requests to a matching host that do **not** contain
   the proxy token are rejected with 403. This prevents a compromised workload
   from bypassing the secret-swap mechanism with alternative credentials. Default: `false`.
+- **`selection_group`:** entries with the same value are alternative credentials.
+  Each matching group requires exactly one entry's proxy token, as the full
+  header value or `Bearer <token>`; otherwise the request is rejected with 403.
+  Set this on the secret entry alongside a header-only `replace` with explicit
+  `match_headers` and `require: true`. Matching entries outside the group cannot
+  target the same headers.
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.
-
-**Alternative credentials:** Use `selection_group` to let the sandbox choose
-between accounts at the same API. Grouped entries require header-only
-`replace`, explicit `match_headers`, and `require: true`:
-
-```yaml
-secrets:
-  - source: {type: env, var: API_KEY_A}
-    selection_group: accounts
-    replace:
-      proxy_value: account-a
-      match_headers: ["Authorization"]
-      require: true
-    rules:
-      - host: "api.example.com"
-  - source: {type: env, var: API_KEY_B}
-    selection_group: accounts
-    replace:
-      proxy_value: account-b
-      match_headers: ["Authorization"]
-      require: true
-    rules:
-      - host: "api.example.com"
-```
-
-For matching requests, each group requires exactly one account's proxy token,
-as the full header value or `Bearer <token>`. For example,
-`Authorization: Bearer account-b` selects account B. Requests with missing,
-unknown, or mixed account tokens are rejected with 403.
-
-On the same request, grouped headers cannot also be targeted by another group
-or an ungrouped secret entry.
 
 Secret sources:
 
