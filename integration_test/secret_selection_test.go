@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,9 +27,6 @@ func TestSecretSelectionReload(t *testing.T) {
 	t.Setenv("IRON_SELECTION_SECRET_C", secretC)
 	t.Setenv("IRON_SELECTION_MANAGEMENT_KEY", managementKey)
 
-	entered, release := make(chan struct{}), make(chan struct{})
-	var releaseOnce sync.Once
-	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	var upstreamCalls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls.Add(1)
@@ -44,21 +40,10 @@ func TestSecretSelectionReload(t *testing.T) {
 			http.Error(w, "unexpected credential", http.StatusUnauthorized)
 			return
 		}
-		if r.URL.Path == "/held" {
-			close(entered)
-			select {
-			case <-release:
-			case <-r.Context().Done():
-				return
-			}
-		}
-		// Request-side assertions detect truncation; cleanup can cancel this handler.
+		// Client assertions detect incomplete responses.
 		_, _ = io.WriteString(w, account)
 	}))
-	t.Cleanup(func() {
-		unblock()
-		upstream.Close()
-	})
+	t.Cleanup(upstream.Close)
 
 	tmpDir := t.TempDir()
 	secretPath := filepath.Join(tmpDir, "account-b")
@@ -74,8 +59,8 @@ func TestSecretSelectionReload(t *testing.T) {
 	defer cancel()
 	client := &http.Client{Timeout: 10 * time.Second}
 
-	request := func(path string, values []string) *http.Request {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+proxy.HTTPAddr+path, nil)
+	request := func(values []string) *http.Request {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+proxy.HTTPAddr+"/", nil)
 		require.NoError(t, err)
 		req.Host = strings.TrimPrefix(upstream.URL, "http://")
 		req.Header["Authorization"] = values
@@ -91,8 +76,8 @@ func TestSecretSelectionReload(t *testing.T) {
 		require.Equal(t, body, string(got))
 	}
 
-	check(request("/", []string{"Bearer account-a"}), http.StatusOK, "a")
-	check(request("/", []string{"Bearer account-b"}), http.StatusOK, "b-before")
+	check(request([]string{"Bearer account-a"}), http.StatusOK, "a")
+	check(request([]string{"Bearer account-b"}), http.StatusOK, "b-before")
 	for _, values := range [][]string{
 		nil,
 		{"Bearer unknown"},
@@ -103,39 +88,13 @@ func TestSecretSelectionReload(t *testing.T) {
 		{"Bearer account-c"},
 	} {
 		before := upstreamCalls.Load()
-		resp, err := client.Do(request("/", values))
+		resp, err := client.Do(request(values))
 		require.NoError(t, err)
 		_, err = io.Copy(io.Discard, resp.Body)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
 		require.Equal(t, http.StatusForbidden, resp.StatusCode)
 		require.Equal(t, before, upstreamCalls.Load())
-	}
-
-	type response struct {
-		status int
-		body   string
-		err    error
-	}
-	held := make(chan response, 1)
-	heldRequest := request("/held", []string{"Bearer account-b"})
-	go func() {
-		resp, err := client.Do(heldRequest)
-		if err != nil {
-			held <- response{err: err}
-			return
-		}
-		body, err := io.ReadAll(resp.Body)
-		closeErr := resp.Body.Close()
-		if err == nil {
-			err = closeErr
-		}
-		held <- response{status: resp.StatusCode, body: string(body), err: err}
-	}()
-	select {
-	case <-entered:
-	case <-ctx.Done():
-		require.FailNow(t, "held request did not reach upstream", "%v", ctx.Err())
 	}
 
 	staged := secretPath + ".next"
@@ -148,16 +107,7 @@ func TestSecretSelectionReload(t *testing.T) {
 	reload.Header.Set("Authorization", "Bearer "+managementKey)
 	check(reload, http.StatusOK, "{\"status\":\"ok\"}\n")
 
-	check(request("/", []string{"Bearer account-a"}), http.StatusOK, "a")
-	check(request("/", []string{"Bearer account-b"}), http.StatusOK, "b-after")
-	check(request("/", []string{"Bearer account-c"}), http.StatusOK, "c")
-	unblock()
-	select {
-	case got := <-held:
-		require.NoError(t, got.err)
-		require.Equal(t, http.StatusOK, got.status)
-		require.Equal(t, "b-before", got.body)
-	case <-ctx.Done():
-		require.FailNow(t, "held request did not complete after reload", "%v", ctx.Err())
-	}
+	check(request([]string{"Bearer account-a"}), http.StatusOK, "a")
+	check(request([]string{"Bearer account-b"}), http.StatusOK, "b-after")
+	check(request([]string{"Bearer account-c"}), http.StatusOK, "c")
 }

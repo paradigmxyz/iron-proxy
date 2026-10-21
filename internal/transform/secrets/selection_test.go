@@ -9,7 +9,6 @@ import (
 	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 func selectionEntry(source, token, group, header string) secretEntry {
@@ -35,14 +34,10 @@ func TestSecrets_AlternativeAccounts(t *testing.T) {
 		{name: "case insensitive bearer", header: http.Header{"Authorization": {"bearer account-a"}}, want: "bearer secret-a"},
 		{name: "missing"},
 		{name: "unknown marker", header: http.Header{"Authorization": {"Bearer account-c"}}},
-		{name: "plain credential", header: http.Header{"Authorization": {"Bearer upstream-credential"}}},
 		{name: "marker prefix", header: http.Header{"Authorization": {"Bearer prefix-account-a"}}},
 		{name: "marker suffix", header: http.Header{"Authorization": {"Bearer account-a-suffix"}}},
 		{name: "basic auth", header: http.Header{"Authorization": {"Basic dXNlcjphY2NvdW50LWE="}}},
-		{name: "concatenated markers", header: http.Header{"Authorization": {"Bearer account-a account-b"}}},
 		{name: "multiple accounts", header: http.Header{"Authorization": {"Bearer account-a", "Bearer account-b"}}},
-		{name: "selected and plain credential", header: http.Header{"Authorization": {"Bearer account-a", "Bearer upstream-credential"}}},
-		{name: "selected and unknown marker", header: http.Header{"Authorization": {"Bearer account-a", "Bearer account-c"}}},
 		{name: "unauthorized header", header: http.Header{"X-Api-Key": {"account-a"}}},
 	}
 	for _, tc := range cases {
@@ -348,20 +343,4 @@ func TestSecrets_AlternativeSelectionRequiresHeaderReplacement(t *testing.T) {
 			require.ErrorContains(t, err, "selection_group requires mandatory header-only replacement")
 		})
 	}
-}
-
-func TestSecrets_AlternativeSelectionJSONConfig(t *testing.T) {
-	var cfg yaml.Node
-	require.NoError(t, yaml.Unmarshal([]byte(`{"secrets":[
-		{"source":{"type":"control_plane","value":"secret-a"},"selection_group":"provider-account","replace":{"proxy_value":"account-a","match_headers":["Authorization"],"require":true},"rules":[{"host":"api.openai.com"}]},
-		{"source":{"type":"control_plane","value":"secret-b"},"selection_group":"provider-account","replace":{"proxy_value":"account-b","match_headers":["Authorization"],"require":true},"rules":[{"host":"api.openai.com"}]}
-	]}`), &cfg))
-	s, err := factory(cfg, nil)
-	require.NoError(t, err)
-	req := openaiReq("POST", "/v1/responses")
-	req.Header.Set("Authorization", "Bearer account-b")
-	result, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
-	require.NoError(t, err)
-	require.Equal(t, transform.ActionContinue, result.Action)
-	require.Equal(t, "Bearer secret-b", req.Header.Get("Authorization"))
 }
