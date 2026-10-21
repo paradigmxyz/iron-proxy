@@ -474,57 +474,37 @@ values before forwarding upstream. You control where it looks:
 
 Query parameters are always scanned.
 
-#### Alternative credentials
-
-Use `selection_group` when a request may choose between credentials for the
-same destination. Entries in a group use header-only `replace` blocks with
-explicit `match_headers` and `require: true`:
+**Alternative credentials:** Use `selection_group` to let the sandbox choose
+between accounts at the same API. Grouped entries require header-only
+`replace`, explicit `match_headers`, and `require: true`:
 
 ```yaml
 secrets:
-  - source: {type: env, var: PROVIDER_ACCOUNT_A}
-    selection_group: provider-account
+  - source: {type: env, var: API_KEY_A}
+    selection_group: accounts
     replace:
       proxy_value: account-a
-      match_headers: [Authorization]
+      match_headers: ["Authorization"]
       require: true
     rules:
-      - host: api.example.com
-        methods: [POST]
-        paths: [/v1/responses]
-  - source: {type: env, var: PROVIDER_ACCOUNT_B}
-    selection_group: provider-account
+      - host: "api.example.com"
+  - source: {type: env, var: API_KEY_B}
+    selection_group: accounts
     replace:
       proxy_value: account-b
-      match_headers: [Authorization]
+      match_headers: ["Authorization"]
       require: true
     rules:
-      - host: api.example.com
-        methods: [POST]
-        paths: [/v1/responses]
+      - host: "api.example.com"
 ```
 
-For every group with a matching host, method, and path, the request must select
-exactly one matching entry. A configured header value must equal that entry's
-proxy token, either directly or following `Bearer ` (case-insensitive scheme).
-For example, `Authorization: Bearer account-b` selects account B. Prefixes,
-suffixes, and Basic authentication do not select grouped credentials.
+For matching requests, each group requires exactly one account's proxy token,
+as the full header value or `Bearer <token>`. For example,
+`Authorization: Bearer account-b` selects account B. Requests with missing,
+unknown, or mixed account tokens are rejected with 403.
 
-Selection examines the original headers before any secret replacement. Every
-value in the matching entries' configured headers must belong to the selected
-entry. Missing tokens, unknown tokens, raw upstream credentials, and multiple
-account selections produce 403 without replacing any secret. Unrelated headers
-are unaffected. A group imposes no requirement on requests outside its rules.
-
-A grouped header cannot also be targeted by another matching group or an
-ungrouped replacement/injection entry. Such overlaps are rejected before any
-secret is fetched or replaced, regardless of entry order. Use separate headers
-for independently required credentials.
-
-Group names are local to one `secrets` transform. Entries without a group retain
-their independent requirements; use separate groups when two independently
-selected credentials must accompany the same request. Group selection does not
-scan request bodies, paths, or query strings, and does not support `inject`.
+On the same request, grouped headers cannot also be targeted by another group
+or an ungrouped secret entry.
 
 Secret sources:
 
