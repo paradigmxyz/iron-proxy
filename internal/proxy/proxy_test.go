@@ -37,6 +37,16 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+type countingFlusher struct {
+	*httptest.ResponseRecorder
+	flushes int
+}
+
+func (w *countingFlusher) Flush() {
+	w.flushes++
+	w.ResponseRecorder.Flush()
+}
+
 func generateTestCA(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 
@@ -647,6 +657,50 @@ func TestHTTPProxy_SSEStreaming(t *testing.T) {
 	require.Contains(t, string(body), "data: event1")
 	require.Contains(t, string(body), "data: event2")
 	require.Contains(t, string(body), "data: event3")
+}
+
+func TestIsStreamingResponse(t *testing.T) {
+	cases := []struct {
+		name        string
+		contentType string
+		want        bool
+	}{
+		{name: "SSE", contentType: "text/event-stream; charset=utf-8", want: true},
+		{name: "Connect proto", contentType: "application/connect+proto", want: true},
+		{name: "Connect JSON", contentType: "application/connect+json", want: true},
+		{name: "gRPC", contentType: "application/grpc", want: true},
+		{name: "gRPC proto", contentType: "application/grpc+proto", want: true},
+		{name: "JSON", contentType: "application/json", want: false},
+		{name: "protobuf unary", contentType: "application/proto", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := &http.Response{Header: http.Header{"Content-Type": []string{tc.contentType}}}
+			require.Equal(t, tc.want, isStreamingResponse(resp))
+		})
+	}
+}
+
+func TestStreamResponseFlushesEachChunk(t *testing.T) {
+	recorder := &countingFlusher{ResponseRecorder: httptest.NewRecorder()}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/connect+proto"}},
+		Body: transform.NewBufferedBody(io.NopCloser(io.MultiReader(
+			strings.NewReader("first"),
+			strings.NewReader("second"),
+		)), 0),
+		Trailer: http.Header{"Grpc-Status": []string{"0"}},
+	}
+
+	p := &Proxy{logger: testLogger()}
+	p.streamResponse(recorder, resp)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "firstsecond", recorder.Body.String())
+	require.Equal(t, 3, recorder.flushes, "headers and each upstream chunk must be flushed")
+	require.Equal(t, "0", recorder.Header().Get(http.TrailerPrefix+"Grpc-Status"))
 }
 
 func TestHTTPProxy_RequestContentLengthPreserved(t *testing.T) {
