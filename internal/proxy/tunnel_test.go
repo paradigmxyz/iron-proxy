@@ -936,68 +936,66 @@ func allowlistFromYAML(t *testing.T, cfg string) transform.Transformer {
 // preflight matches on host only, the requests inside the MITM tunnel are
 // still checked against methods and paths.
 func TestTunnel_CONNECT_MITM_AllowlistMethodAndPathRules(t *testing.T) {
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprint(w, "ok")
-	}))
-	defer upstream.Close()
-
+	const host = "mitm.example.com"
 	al := allowlistFromYAML(t, `
 rules:
   - host: "mitm.example.com"
     methods: ["GET"]
     paths: ["/allowed"]
 `)
-	p, tunnelAddr, caPool := startTunnelProxy(t, []transform.Transformer{al})
-	upstreamAddr := upstream.Listener.Addr().String()
-	p.transport = &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
-		},
-	}
-
-	const fakeHost = "mitm.example.com"
-
-	t.Run("unlisted host is rejected at CONNECT", func(t *testing.T) {
-		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
-		require.NoError(t, err)
-		defer conn.Close()
-		_, err = fmt.Fprintf(conn, "CONNECT other.example.com:443 HTTP/1.1\r\nHost: other.example.com:443\r\n\r\n")
-		require.NoError(t, err)
-		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-		require.Equal(t, http.StatusForbidden, resp.StatusCode)
-	})
-
-	conn, _ := dialCONNECT(t, tunnelAddr, fakeHost+":443")
-	tlsConn := tls.Client(conn, &tls.Config{RootCAs: caPool, ServerName: fakeHost})
-	defer func() { _ = tlsConn.Close() }()
-	require.NoError(t, tlsConn.Handshake())
-	tlsBr := bufio.NewReader(tlsConn)
+	conn, br := dialMITMTunnel(t, []transform.Transformer{al}, host)
 
 	cases := []struct {
-		name   string
-		method string
-		target string // request-target, written as-is
-		want   int
+		name, method, target string
+		want                 int
 	}{
 		{"allowed method and path", http.MethodGet, "/allowed", http.StatusOK},
 		{"wrong path", http.MethodGet, "/other", http.StatusForbidden},
 		{"wrong method", http.MethodPost, "/allowed", http.StatusForbidden},
-		{"CONNECT inside the tunnel", http.MethodConnect, fakeHost + ":443", http.StatusForbidden},
+		{"CONNECT inside the tunnel", http.MethodConnect, host + ":443", http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := fmt.Fprintf(tlsConn, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n", tc.method, tc.target, fakeHost)
-			require.NoError(t, err)
-			resp, err := http.ReadResponse(tlsBr, nil)
-			require.NoError(t, err)
-			_, err = io.ReadAll(resp.Body)
-			require.NoError(t, err)
-			require.NoError(t, resp.Body.Close())
-			require.Equal(t, tc.want, resp.StatusCode)
+			require.Equal(t, tc.want, tunnelRequestStatus(t, conn, br, tc.method, tc.target, host))
 		})
 	}
+}
+
+// dialMITMTunnel starts a proxy with the given transforms whose upstream is a
+// local TLS server, opens a CONNECT tunnel to host:443 and completes the TLS
+// handshake against the proxy CA.
+func dialMITMTunnel(t *testing.T, transforms []transform.Transformer, host string) (*tls.Conn, *bufio.Reader) {
+	t.Helper()
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	p, tunnelAddr, caPool := startTunnelProxy(t, transforms)
+	p.transport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstream.Listener.Addr().String())
+		},
+	}
+
+	conn, _ := dialCONNECT(t, tunnelAddr, host+":443")
+	tlsConn := tls.Client(conn, &tls.Config{RootCAs: caPool, ServerName: host})
+	t.Cleanup(func() { _ = tlsConn.Close() })
+	require.NoError(t, tlsConn.Handshake())
+	return tlsConn, bufio.NewReader(tlsConn)
+}
+
+// tunnelRequestStatus writes a raw request into the tunnel and returns the
+// response status. The request-target is written as-is.
+func tunnelRequestStatus(t *testing.T, conn *tls.Conn, br *bufio.Reader, method, target, host string) int {
+	t.Helper()
+	_, err := fmt.Fprintf(conn, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n", method, target, host)
+	require.NoError(t, err)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	return resp.StatusCode
 }
