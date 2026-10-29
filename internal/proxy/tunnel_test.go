@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	_ "github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
 
 func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy, string, *x509.CertPool) {
@@ -914,5 +916,88 @@ func TestServeOneHTTPConn_HijackWaitsForHandler(t *testing.T) {
 	case <-serveReturned:
 	case <-time.After(5 * time.Second):
 		t.Fatal("serveOneHTTPConn did not return after the hijacking handler finished")
+	}
+}
+
+// allowlistFromYAML builds the allowlist transform from its YAML config, the
+// same way the proxy does at startup.
+func allowlistFromYAML(t *testing.T, cfg string) transform.Transformer {
+	t.Helper()
+	var node yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(cfg), &node))
+	factory, err := transform.Lookup("allowlist")
+	require.NoError(t, err)
+	tr, err := factory(*node.Content[0], testLogger())
+	require.NoError(t, err)
+	return tr
+}
+
+// Rules with methods or paths must not block the tunnel itself. The CONNECT
+// preflight matches on host only, the requests inside the MITM tunnel are
+// still checked against methods and paths.
+func TestTunnel_CONNECT_MITM_AllowlistMethodAndPathRules(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprint(w, "ok")
+	}))
+	defer upstream.Close()
+
+	al := allowlistFromYAML(t, `
+rules:
+  - host: "mitm.example.com"
+    methods: ["GET"]
+    paths: ["/allowed"]
+`)
+	p, tunnelAddr, caPool := startTunnelProxy(t, []transform.Transformer{al})
+	upstreamAddr := upstream.Listener.Addr().String()
+	p.transport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstreamAddr)
+		},
+	}
+
+	const fakeHost = "mitm.example.com"
+
+	t.Run("unlisted host is rejected at CONNECT", func(t *testing.T) {
+		conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+		require.NoError(t, err)
+		defer conn.Close()
+		_, err = fmt.Fprintf(conn, "CONNECT other.example.com:443 HTTP/1.1\r\nHost: other.example.com:443\r\n\r\n")
+		require.NoError(t, err)
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	conn, _ := dialCONNECT(t, tunnelAddr, fakeHost+":443")
+	tlsConn := tls.Client(conn, &tls.Config{RootCAs: caPool, ServerName: fakeHost})
+	defer func() { _ = tlsConn.Close() }()
+	require.NoError(t, tlsConn.Handshake())
+	tlsBr := bufio.NewReader(tlsConn)
+
+	cases := []struct {
+		name   string
+		method string
+		target string // request-target, written as-is
+		want   int
+	}{
+		{"allowed method and path", http.MethodGet, "/allowed", http.StatusOK},
+		{"wrong path", http.MethodGet, "/other", http.StatusForbidden},
+		{"wrong method", http.MethodPost, "/allowed", http.StatusForbidden},
+		{"CONNECT inside the tunnel", http.MethodConnect, fakeHost + ":443", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fmt.Fprintf(tlsConn, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n", tc.method, tc.target, fakeHost)
+			require.NoError(t, err)
+			resp, err := http.ReadResponse(tlsBr, nil)
+			require.NoError(t, err)
+			_, err = io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, tc.want, resp.StatusCode)
+		})
 	}
 }
