@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -206,4 +209,44 @@ func TestOPClientCache_PropagatesNewClientError(t *testing.T) {
 	_, err := cache.get(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sdk init failed")
+}
+
+func TestOPSources_ShareOneClientAcrossRegistries(t *testing.T) {
+	// Separate transforms each build their own registry. Concurrent first
+	// fetches across them must still create only one SDK client.
+	var calls atomic.Int32
+	saved := opClients
+	opClients = &opClientCache{
+		getenv: func(string) string { return "tok" },
+		newClient: func(_ context.Context, _ string) (opClient, error) {
+			calls.Add(1)
+			time.Sleep(10 * time.Millisecond) // widen the window for overlapping creation
+			return staticOPClient("v", nil), nil
+		},
+	}
+	t.Cleanup(func() { opClients = saved })
+
+	var sources []Source
+	for _, ref := range []string{"op://v/slack/token", "op://v/openai/key", "op://v/centaur/token"} {
+		src, err := BuildSource(yamlNode(t, map[string]string{"type": "1password", "secret_ref": ref}), slog.Default())
+		require.NoError(t, err)
+		sources = append(sources, src)
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, len(sources))
+	for _, src := range sources {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := src.Get(context.Background())
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.Equal(t, int32(1), calls.Load())
 }
