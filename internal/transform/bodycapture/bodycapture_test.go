@@ -16,7 +16,8 @@ import (
 )
 
 // newTransform constructs a bodyCapture for testing without going through the
-// YAML factory. Tests pin behavior, not parsing.
+// YAML factory, with response capture off — the shipped default. Tests pin
+// behavior, not parsing.
 func newTransform(t *testing.T, maxBytes int64, rules []hostmatch.RuleConfig) *bodyCapture {
 	t.Helper()
 	compiled, err := hostmatch.CompileRules(rules, "body_capture")
@@ -24,6 +25,20 @@ func newTransform(t *testing.T, maxBytes int64, rules []hostmatch.RuleConfig) *b
 	return &bodyCapture{
 		rules:               compiled,
 		maxRequestBodyBytes: maxBytes,
+	}
+}
+
+// newResponseTransform is newTransform with response capture enabled and both
+// caps pinned, for the tests that exercise the response half.
+func newResponseTransform(t *testing.T, maxRequest, maxResponse int64, rules []hostmatch.RuleConfig) *bodyCapture {
+	t.Helper()
+	compiled, err := hostmatch.CompileRules(rules, "body_capture")
+	require.NoError(t, err)
+	return &bodyCapture{
+		rules:                compiled,
+		maxRequestBodyBytes:  maxRequest,
+		captureResponseBody:  true,
+		maxResponseBodyBytes: maxResponse,
 	}
 }
 
@@ -164,10 +179,11 @@ func TestBodyCapture_MultipleRules_FirstMatchCapturesOnce(t *testing.T) {
 	require.False(t, tctx.BodyCapture.RequestBodyTruncated())
 }
 
-func TestBodyCapture_TransformResponse_IsNoop(t *testing.T) {
-	// TransformResponse must NOT touch the response body — doing so would
-	// force-buffer streaming SSE responses (Claude/OpenAI replies), stalling
-	// the client. This test pins that behavior.
+func TestBodyCapture_TransformResponse_IsNoopByDefault(t *testing.T) {
+	// Response capture is opt-in. Without `capture_response_body: true` the
+	// response leg must not touch the response body at all — an existing
+	// configuration sees exactly the behavior it saw before. The tests in
+	// response_test.go cover the opted-in path.
 	bc := newTransform(t, 16*1024, []hostmatch.RuleConfig{
 		{Host: "api.anthropic.com"},
 	})
@@ -197,4 +213,6 @@ func TestBodyCapture_BodyCaptureInterface(t *testing.T) {
 	c := &capture{requestBody: "hi", requestBodyTruncated: true}
 	require.Equal(t, "hi", c.RequestBody())
 	require.True(t, c.RequestBodyTruncated())
+	require.Equal(t, "", c.ResponseBody())
+	require.False(t, c.ResponseBodyTruncated())
 }
