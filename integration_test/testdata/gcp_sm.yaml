@@ -1,0 +1,47 @@
+dns:
+  proxy_ip: "127.0.0.1"
+  listen: "127.0.0.1:0"
+
+proxy:
+  http_listen: "127.0.0.1:0"
+  https_listen: "127.0.0.1:0"
+  max_request_body_bytes: 1048576
+  upstream_deny_cidrs: []
+
+tls:
+  ca_cert: tmp/ca.crt
+  ca_key: tmp/ca.key
+
+transforms:
+  - name: allowlist
+    config:
+      domains:
+        - "127.0.0.1"
+
+  - name: secrets
+    config:
+      secrets:
+        - source:
+            type: gcp_sm
+            project: "{{ .Project }}"
+            secret: iron-proxy-it-raw
+          proxy_value: "proxy-raw-secret"
+          match_headers: ["X-Raw-Secret"]
+          rules:
+            - host: "127.0.0.1"
+
+        - source:
+            type: gcp_sm
+            project: "{{ .Project }}"
+            secret: iron-proxy-it-json
+            json_key: "example-key"
+          proxy_value: "proxy-json-secret"
+          match_headers: ["X-Json-Secret"]
+          rules:
+            - host: "127.0.0.1"
+
+metrics:
+  listen: "127.0.0.1:0"
+
+log:
+  level: info

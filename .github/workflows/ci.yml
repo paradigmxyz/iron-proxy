@@ -96,6 +96,7 @@ jobs:
           OP_CONNECT_HOST: http://localhost:8080
           OP_CONNECT_TOKEN: ${{ secrets.OP_CONNECT_TOKEN }}
           GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64: ${{ secrets.GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64 }}
+          GCP_SM_PROJECT: ${{ secrets.GCP_SM_PROJECT }}
         run: |
           if [ -n "$GCP_BIGQUERY_SERVICE_ACCOUNT_KEY_B64" ]; then
             keyfile="$RUNNER_TEMP/gcp-bq-sa-key.json"
