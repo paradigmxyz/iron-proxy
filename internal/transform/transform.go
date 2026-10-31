@@ -81,6 +81,12 @@ type TransformContext struct {
 	Mode       Mode
 	Tunnel     *TunnelInfo
 
+	// TunnelPreflight is true while the proxy evaluates the synthetic CONNECT
+	// request that decides whether a tunnel may be established (see
+	// proxy.tunnelTransformCheck). Requests inside the tunnel run through the
+	// pipeline again with TunnelPreflight false.
+	TunnelPreflight bool
+
 	// BodyCapture is the side channel a body_capture transform uses to
 	// communicate captured request body bytes out of the pipeline. The proxy
 	// copies it onto PipelineResult after the request pipeline runs so the
