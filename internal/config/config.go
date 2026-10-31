@@ -52,6 +52,7 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 // package stays decoupled from the consumer's typed schema, and validation
 // errors surface where the value is actually used.
 type Config struct {
+	SSH          yaml.Node    `yaml:"ssh"`
 	DNS          DNS          `yaml:"dns"`
 	Proxy        Proxy        `yaml:"proxy"`
 	TLS          TLS          `yaml:"tls"`
