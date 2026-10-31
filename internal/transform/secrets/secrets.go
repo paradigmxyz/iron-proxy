@@ -32,10 +32,11 @@ type secretsConfig struct {
 }
 
 type secretEntry struct {
-	Source  yaml.Node              `yaml:"source"`
-	Rules   []hostmatch.RuleConfig `yaml:"rules"`
-	Inject  *injectConfig          `yaml:"inject,omitempty"`
-	Replace *replaceConfig         `yaml:"replace,omitempty"`
+	Source         yaml.Node              `yaml:"source"`
+	Rules          []hostmatch.RuleConfig `yaml:"rules"`
+	Inject         *injectConfig          `yaml:"inject,omitempty"`
+	Replace        *replaceConfig         `yaml:"replace,omitempty"`
+	SelectionGroup string                 `yaml:"selection_group,omitempty"`
 
 	// Deprecated top-level fields for backwards compatibility.
 	// Users should migrate to the replace block.
@@ -70,12 +71,13 @@ type resolvedSecret struct {
 	rules  []hostmatch.Rule
 
 	// replace mode fields
-	proxyValue   string
-	matchHeaders []headerMatcher // empty = all headers
-	matchBody    bool
-	matchPath    bool
-	matchQuery   bool
-	require      bool
+	proxyValue     string
+	matchHeaders   []headerMatcher // empty = all headers
+	matchBody      bool
+	matchPath      bool
+	matchQuery     bool
+	require        bool
+	selectionGroup string
 
 	// inject mode fields
 	injectHeader     string
@@ -207,6 +209,9 @@ func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets,
 		if err != nil {
 			return nil, err
 		}
+		if entry.SelectionGroup != "" && (replace == nil || !replace.Require || len(replace.MatchHeaders) == 0 || replace.MatchBody || replace.MatchPath || replace.MatchQuery) {
+			return nil, fmt.Errorf("secrets[%d]: selection_group requires mandatory header-only replacement", i)
+		}
 
 		source, err := resolveSource(registry, entry.Source)
 		if err != nil {
@@ -241,15 +246,16 @@ func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets,
 				return nil, err
 			}
 			resolved = append(resolved, resolvedSecret{
-				source:       source,
-				mode:         "replace",
-				proxyValue:   replace.ProxyValue,
-				matchHeaders: matchers,
-				matchBody:    replace.MatchBody,
-				matchPath:    replace.MatchPath,
-				matchQuery:   replace.MatchQuery,
-				require:      replace.Require,
-				rules:        rules,
+				source:         source,
+				mode:           "replace",
+				proxyValue:     replace.ProxyValue,
+				matchHeaders:   matchers,
+				matchBody:      replace.MatchBody,
+				matchPath:      replace.MatchPath,
+				matchQuery:     replace.MatchQuery,
+				require:        replace.Require,
+				selectionGroup: entry.SelectionGroup,
+				rules:          rules,
 			})
 		}
 	}
@@ -331,6 +337,13 @@ func validateInject(i int, cfg *injectConfig) error {
 func (s *Secrets) Name() string { return "secrets" }
 
 func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+	// Resolve all groups against the original headers before replacing any secret.
+	selected, rejectedGroup := s.selectAlternatives(req)
+	if rejectedGroup != "" {
+		tctx.Annotate("rejected", rejectedGroup)
+		tctx.Annotate("reject_reason", "credential_selection")
+		return &transform.TransformResult{Action: transform.ActionReject}, nil
+	}
 	type secretRecord struct {
 		Secret    string   `json:"secret"`
 		Locations []string `json:"locations"`
@@ -338,8 +351,11 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	var swapped, injected []secretRecord
 	var unavailable []string
 
-	for _, sec := range s.secrets {
+	for i, sec := range s.secrets {
 		if !hostmatch.MatchAnyRule(sec.rules, req) {
+			continue
+		}
+		if sec.selectionGroup != "" && selected[sec.selectionGroup] != i {
 			continue
 		}
 
@@ -466,6 +482,13 @@ func (s *Secrets) swapHeaders(req *http.Request, sec *resolvedSecret, realValue 
 		processed[canonical] = struct{}{}
 		hit := false
 		headers.Swap(req.Header, canonical, wireName, func(v string) string {
+			if sec.selectionGroup != "" {
+				if !matchesProxyValue(v, sec.proxyValue) {
+					return v
+				}
+				hit = true
+				return strings.TrimSuffix(v, sec.proxyValue) + realValue
+			}
 			if headerContains(canonical, v, sec.proxyValue) {
 				hit = true
 			}
