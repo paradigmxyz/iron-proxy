@@ -11,7 +11,8 @@ tools.
 - Core packages live under `internal/`. The transform pipeline lives in
   `internal/transform/` with one subpackage per transform
   (`allowlist`, `secrets`, `bodycapture`, `headerallowlist`, `annotate`,
-  `judge`, `grpc`, `hmacsign`, `oauth`, `awsauth`, `gcpauth`).
+  `judge`, `grpc`, `hmacsign`, `oauth`, `awsauth`, `gcpauth`, `gcpidtoken`;
+  `gcpjwt` is a shared JWT helper, not a transform).
 - Integration tests against real backends (AWS, 1Password, GCP, Postgres,
   gRPC, MCP) live in `integration_test/`. Unit tests sit next
   to the code they exercise.
