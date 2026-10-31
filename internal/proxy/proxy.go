@@ -42,6 +42,7 @@ type Proxy struct {
 	tunnelAddr           string
 	tunnelListener       net.Listener
 	tunnelDone           chan struct{}
+	reverseServer        *http.Server
 	certCache            *certcache.Cache
 	pipeline             *transform.PipelineHolder
 	transport            *http.Transport
@@ -96,6 +97,11 @@ type Options struct {
 	// requests can never pass through un-transformed (leaking placeholder
 	// credentials upstream) during startup.
 	Ready func() bool
+
+	// ReverseAddr, when set, serves the reverse listener with ReverseTLS,
+	// which must require client certificates (see ReverseTLSConfig).
+	ReverseAddr string
+	ReverseTLS  *tls.Config
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -144,6 +150,15 @@ func New(opts Options) *Proxy {
 	// negotiated conns through the existing handler); zero config never errors.
 	_ = http2.ConfigureServer(p.httpsServer, &http2.Server{})
 
+	if opts.ReverseAddr != "" {
+		p.reverseServer = &http.Server{
+			Addr:      opts.ReverseAddr,
+			Handler:   http.HandlerFunc(p.handleReverse),
+			TLSConfig: opts.ReverseTLS,
+		}
+		_ = http2.ConfigureServer(p.reverseServer, &http2.Server{}) // Zero config never errors.
+	}
+
 	return p
 }
 
@@ -152,7 +167,10 @@ func New(opts Options) *Proxy {
 func (p *Proxy) ListenAndServe() error {
 	n := 2
 	if p.tunnelAddr != "" {
-		n = 3
+		n++
+	}
+	if p.reverseServer != nil {
+		n++
 	}
 	errc := make(chan error, n)
 
@@ -177,6 +195,12 @@ func (p *Proxy) ListenAndServe() error {
 	if p.tunnelAddr != "" {
 		go func() {
 			errc <- fmt.Errorf("tunnel: %w", p.listenTunnel())
+		}()
+	}
+
+	if p.reverseServer != nil {
+		go func() {
+			errc <- p.serveReverse()
 		}()
 	}
 
@@ -227,6 +251,11 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 
 	errHTTP := p.httpServer.Shutdown(ctx)
 
+	var errReverse error
+	if p.reverseServer != nil {
+		errReverse = p.reverseServer.Shutdown(ctx)
+	}
+
 	var errHTTPS error
 	if p.tlsMode == config.TLSModeSNIOnly {
 		if p.tlsListener != nil {
@@ -245,7 +274,10 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 	if errHTTP != nil {
 		return errHTTP
 	}
-	return errHTTPS
+	if errHTTPS != nil {
+		return errHTTPS
+	}
+	return errReverse
 }
 
 func (p *Proxy) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -324,14 +356,16 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	}
 
 	// Validate SNI matches Host header on TLS connections
+	sni := ""
 	if r.TLS != nil {
+		sni = r.TLS.ServerName
 		hostOnly := r.Host
 		if h, _, err := net.SplitHostPort(hostOnly); err == nil {
 			hostOnly = h
 		}
-		if r.TLS.ServerName != hostOnly {
+		if sni != hostOnly {
 			p.logger.Warn("SNI/Host mismatch",
-				slog.String("sni", r.TLS.ServerName),
+				slog.String("sni", sni),
 				slog.String("host", r.Host),
 			)
 			http.Error(w, "SNI and Host header mismatch", http.StatusBadRequest)
@@ -339,15 +373,19 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		}
 	}
 
+	p.proxyRequest(w, r, tunnelInfo, scheme, host, sni)
+}
+
+// proxyRequest runs a request that the listener has already validated through
+// the transform pipeline and sends it to scheme://host.
+func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request, tunnelInfo *transform.TunnelInfo, scheme, host, sni string) {
 	// Clone tunnelInfo so a transform that mutates the annotations map can't
 	// leak state into sibling requests that share the same tunnel.
 	tctx := &transform.TransformContext{
 		Logger: p.logger,
 		Mode:   transform.ModeMITM,
 		Tunnel: cloneTunnelInfo(tunnelInfo),
-	}
-	if r.TLS != nil {
-		tctx.SNI = r.TLS.ServerName
+		SNI:    sni,
 	}
 
 	result := &transform.PipelineResult{
@@ -773,11 +811,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 		Control:  p.guard.DialControl,
 	}
 	if upstreamScheme == "wss" {
-		upstreamConn, err = tls.DialWithDialer(
-			dialer,
-			"tcp", upstreamHost,
-			&tls.Config{MinVersion: tls.VersionTLS12},
-		)
+		upstreamConn, err = tls.DialWithDialer(dialer, "tcp", upstreamHost, p.websocketTLSConfig())
 	} else {
 		upstreamConn, err = dialer.DialContext(r.Context(), "tcp", upstreamHost)
 	}
@@ -930,6 +964,20 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: responseHeaderTimeout,
 	}
+}
+
+// websocketTLSConfig is the TLS configuration of upstream WebSocket
+// connections: the upstream transport's, so WebSockets verify upstreams as
+// HTTP requests do, offering only HTTP/1.1. The transport adds h2 to its
+// NextProtos once it has served a request, and an upstream that negotiates h2
+// would not understand the HTTP/1.1 upgrade the proxy writes.
+func (p *Proxy) websocketTLSConfig() *tls.Config {
+	cfg := &tls.Config{MinVersion: tls.VersionTLS12}
+	if p.transport.TLSClientConfig != nil {
+		cfg = p.transport.TLSClientConfig.Clone()
+	}
+	cfg.NextProtos = []string{"http/1.1"}
+	return cfg
 }
 
 func (p *Proxy) doUpstream(req *http.Request) (*http.Response, error) {

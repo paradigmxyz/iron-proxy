@@ -115,6 +115,20 @@ type Proxy struct {
 	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
 	// NO_PROXY environment variables override these fields when set.
 	UpstreamProxy UpstreamProxy `yaml:"upstream_proxy"`
+	// Reverse configures the reverse listener, for clients that can neither
+	// trust the MITM CA nor route through the proxy's DNS.
+	Reverse Reverse `yaml:"reverse"`
+}
+
+// Reverse configures the reverse listener. Clients reach it under the proxy's
+// own name, authenticate with a certificate issued by ClientCA, and name the
+// upstream host in the first path segment: https://<proxy>/<host>/<path> is
+// sent to https://<host>/<path>.
+type Reverse struct {
+	Listen   string `yaml:"listen"`
+	Cert     string `yaml:"cert"`
+	Key      string `yaml:"key"`
+	ClientCA string `yaml:"client_ca"`
 }
 
 // CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
@@ -314,6 +328,15 @@ func Validate(cfg *Config) error {
 
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
 		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
+	}
+
+	if r := cfg.Proxy.Reverse; r.Listen != "" {
+		if r.Cert == "" || r.Key == "" {
+			return fmt.Errorf("proxy.reverse.cert and proxy.reverse.key are required when proxy.reverse.listen is set")
+		}
+		if r.ClientCA == "" {
+			return fmt.Errorf("proxy.reverse.client_ca is required when proxy.reverse.listen is set: the listener only serves clients with a certificate")
+		}
 	}
 
 	if cfg.Management.Listen != "" {

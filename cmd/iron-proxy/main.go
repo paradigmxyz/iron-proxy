@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -228,6 +229,15 @@ func main() {
 		logger.Info("response retry handler enabled", slog.Any("statuses", responseRetryStatuses))
 	}
 
+	var reverseTLS *tls.Config
+	if r := cfg.Proxy.Reverse; r.Listen != "" {
+		reverseTLS, err = proxy.ReverseTLSConfig(r.Cert, r.Key, r.ClientCA)
+		if err != nil {
+			logger.Error("initializing reverse listener", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+	}
+
 	// Initialize proxy.
 	p := proxy.New(proxy.Options{
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
@@ -247,7 +257,9 @@ func main() {
 		// Managed proxies fail closed until the first control-plane config
 		// has been applied; an un-synced pipeline would otherwise pass
 		// requests through with placeholder credentials intact.
-		Ready: managedReady(poller),
+		Ready:       managedReady(poller),
+		ReverseAddr: cfg.Proxy.Reverse.Listen,
+		ReverseTLS:  reverseTLS,
 	})
 
 	// Initialize metrics server.
@@ -295,6 +307,9 @@ func main() {
 	}
 	if cfg.Proxy.TunnelListen != "" {
 		startAttrs = append(startAttrs, slog.String("tunnel_listen", cfg.Proxy.TunnelListen))
+	}
+	if cfg.Proxy.Reverse.Listen != "" {
+		startAttrs = append(startAttrs, slog.String("reverse_listen", cfg.Proxy.Reverse.Listen))
 	}
 	logger.Info("iron-proxy starting", startAttrs...)
 	if pipeline := holder.Load(); !pipeline.Empty() {

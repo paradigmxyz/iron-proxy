@@ -244,6 +244,11 @@ proxy:
   http_listen: ":80"
   https_listen: ":443"
   tunnel_listen: ":8080" # Optional CONNECT/SOCKS5 listener
+  reverse: # Optional mTLS listener for clients that name the upstream in the path
+    listen: ":8444"
+    cert: "/etc/iron-proxy/server.crt"
+    key: "/etc/iron-proxy/server.key"
+    client_ca: "/etc/iron-proxy/clients.crt"
   max_request_body_bytes: 1048576 # 1 MiB (default)
   max_response_body_bytes: 0 # uncapped (default)
 
@@ -765,6 +770,56 @@ export ALL_PROXY=socks5h://172.20.0.2:8080
 
 The SOCKS5 implementation supports no-auth only and accepts IPv4, IPv6,
 and domain name address types.
+
+### Reverse listener (mTLS)
+
+Some clients can neither trust iron-proxy's CA nor route through its DNS or a
+`HTTPS_PROXY`: a Cloudflare Worker's `fetch` only trusts public certificate
+authorities and offers no proxy setting. The reverse listener serves them
+under iron-proxy's own name. The client names the upstream host in the first
+path segment, and iron-proxy sends the request there over TLS through the same
+transform pipeline:
+
+```
+https://proxy.example.com/api.anthropic.com/v1/messages  ->  https://api.anthropic.com/v1/messages
+```
+
+Anyone who can send it a request gets the credentials your transforms inject,
+so the listener requires a client certificate issued by `client_ca`. `cert`
+and `key` are iron-proxy's own certificate, which clients must trust, such as a
+public certificate for the proxy's hostname:
+
+```yaml
+proxy:
+  reverse:
+    listen: ":8444"
+    cert: "/etc/iron-proxy/server.crt"
+    key: "/etc/iron-proxy/server.key"
+    client_ca: "/etc/iron-proxy/clients.crt"
+```
+
+The allowlist, secrets and every other transform see the upstream host, path
+and query, exactly as for requests on the other listeners. WebSocket upgrades
+are relayed to `wss://` upstreams. Paths with dot segments and a first segment
+that is not a hostname or IP address, with an optional port, are rejected with
+400. The listener removes `Cf-*` and `Cdn-Loop` request headers: Cloudflare
+adds `CF-Worker` to every Worker subrequest, and some upstreams refuse
+requests that carry it. iron-proxy reads `cert` and `key` at startup, so
+restart it after renewing the certificate.
+
+A Worker presents its client certificate through an `mtls_certificates`
+binding. Upload the certificate and key with
+`wrangler mtls-certificate upload --cert client.crt --key client.key`, bind
+the returned ID in `wrangler.jsonc`, and send requests with the binding's
+`fetch`:
+
+```jsonc
+"mtls_certificates": [{ "binding": "IRON_PROXY", "certificate_id": "<id>" }]
+```
+
+```js
+await env.IRON_PROXY.fetch('https://proxy.example.com/api.anthropic.com/v1/messages', init)
+```
 
 ### TLS
 
