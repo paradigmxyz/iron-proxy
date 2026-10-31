@@ -36,21 +36,27 @@ type opConfig struct {
 	FailureTTL string `yaml:"failure_ttl,omitempty"`
 }
 
+// opClients is shared by every 1Password source in the process. Each secrets
+// transform, credential source, and config reload builds its own registry, but
+// they must not create SDK clients concurrently: the SDK lazily loads its Wasm
+// core without synchronization, so concurrent first calls each compile a
+// separate copy (~150 MB of RSS apiece).
+var opClients = &opClientCache{
+	getenv: os.Getenv,
+	newClient: func(ctx context.Context, token string) (opClient, error) {
+		c, err := onepassword.NewClient(ctx,
+			onepassword.WithServiceAccountToken(token),
+			onepassword.WithIntegrationInfo("iron-proxy", version.Version),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return opSDKClient{c: c}, nil
+	},
+}
+
 func newOPBuilder(logger *slog.Logger) *opBuilder {
-	cache := &opClientCache{
-		getenv: os.Getenv,
-		newClient: func(ctx context.Context, token string) (opClient, error) {
-			c, err := onepassword.NewClient(ctx,
-				onepassword.WithServiceAccountToken(token),
-				onepassword.WithIntegrationInfo("iron-proxy", version.Version),
-			)
-			if err != nil {
-				return nil, err
-			}
-			return opSDKClient{c: c}, nil
-		},
-	}
-	return &opBuilder{clientFor: cache.get, logger: logger}
+	return &opBuilder{clientFor: opClients.get, logger: logger}
 }
 
 func (r *opBuilder) Build(raw yaml.Node) (secretSource, error) {
@@ -86,7 +92,8 @@ func (r *opBuilder) fetchSecret(ctx context.Context, cfg opConfig) (string, erro
 
 // opClientCache lazily constructs a single SDK client. The 1P SDK loads a
 // Wasm module on NewClient, so reusing the client across multiple secret
-// entries is significantly cheaper than creating one per entry.
+// entries is significantly cheaper than creating one per entry. The mutex also
+// serializes NewClient calls, which the SDK requires (see opClients).
 type opClientCache struct {
 	mu        sync.Mutex
 	client    opClient
