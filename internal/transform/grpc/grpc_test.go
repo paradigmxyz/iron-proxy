@@ -9,9 +9,12 @@ import (
 	"net"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"gopkg.in/yaml.v3"
 
 	transformv1 "github.com/ironsh/iron-proxy/gen/transform/v1"
@@ -23,19 +26,24 @@ import (
 type fakeServer struct {
 	transformv1.UnimplementedTransformServiceServer
 
+	reqDelay     time.Duration // if >0, TransformRequest blocks this long or until ctx is done
 	reqAction    transformv1.TransformAction
 	reqResponse  *transformv1.HttpResponse
 	reqModified  *transformv1.HttpRequest
 	reqAnnot     map[string]string
 	lastReqProto *transformv1.TransformRequestRequest
 
+	respDelay     time.Duration // if >0, TransformResponse blocks this long or until ctx is done
 	respAction    transformv1.TransformAction
 	respModified  *transformv1.HttpResponse
 	respAnnot     map[string]string
 	lastRespProto *transformv1.TransformResponseRequest
 }
 
-func (f *fakeServer) TransformRequest(_ context.Context, in *transformv1.TransformRequestRequest) (*transformv1.TransformRequestResponse, error) {
+func (f *fakeServer) TransformRequest(ctx context.Context, in *transformv1.TransformRequestRequest) (*transformv1.TransformRequestResponse, error) {
+	if err := delay(ctx, f.reqDelay); err != nil {
+		return nil, err
+	}
 	f.lastReqProto = in
 	return &transformv1.TransformRequestResponse{
 		Action:          f.reqAction,
@@ -45,13 +53,30 @@ func (f *fakeServer) TransformRequest(_ context.Context, in *transformv1.Transfo
 	}, nil
 }
 
-func (f *fakeServer) TransformResponse(_ context.Context, in *transformv1.TransformResponseRequest) (*transformv1.TransformResponseResponse, error) {
+func (f *fakeServer) TransformResponse(ctx context.Context, in *transformv1.TransformResponseRequest) (*transformv1.TransformResponseResponse, error) {
+	if err := delay(ctx, f.respDelay); err != nil {
+		return nil, err
+	}
 	f.lastRespProto = in
 	return &transformv1.TransformResponseResponse{
 		Action:           f.respAction,
 		ModifiedResponse: f.respModified,
 		Annotations:      f.respAnnot,
 	}, nil
+}
+
+// delay blocks for d or until ctx is done, so a client that gave up does not
+// leave the fake server sleeping past the end of the test.
+func delay(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func startFakeServer(t *testing.T, srv *fakeServer) string {
@@ -82,6 +107,65 @@ func newTestTransform(t *testing.T, name, target string, sendReq, sendResp bool)
 
 func testContext() *transform.TransformContext {
 	return &transform.TransformContext{}
+}
+
+// A server slower than the configured timeout must fail the call with
+// DeadlineExceeded. The pipeline does not forward a request whose transform
+// failed, so a slow or unreachable server fails closed instead of holding the
+// proxied request open.
+func TestTimeout_DeadlineExceeded(t *testing.T) {
+	srv := &fakeServer{
+		reqDelay:   time.Second,
+		respDelay:  time.Second,
+		reqAction:  transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE,
+		respAction: transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE,
+	}
+	addr := startFakeServer(t, srv)
+
+	gt, err := newGRPCTransform(grpcConfig{Name: "slow", Target: addr, Timeout: 50 * time.Millisecond})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = gt.Close() })
+
+	req, err := http.NewRequest(http.MethodGet, "https://example.com/foo", nil)
+	require.NoError(t, err)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}
+
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{"TransformRequest", func() error {
+			_, err := gt.TransformRequest(context.Background(), testContext(), req)
+			return err
+		}},
+		{"TransformResponse", func() error {
+			_, err := gt.TransformResponse(context.Background(), testContext(), req, resp)
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			require.Error(t, err)
+			require.Equal(t, codes.DeadlineExceeded, status.Code(err))
+		})
+	}
+}
+
+func TestTimeout_DefaultWhenOmitted(t *testing.T) {
+	srv := &fakeServer{reqAction: transformv1.TransformAction_TRANSFORM_ACTION_CONTINUE}
+	gt := newTestTransform(t, "default-timeout", startFakeServer(t, srv), false, false)
+	require.Equal(t, defaultTimeout, gt.timeout)
+}
+
+func TestFactory_ParsesTimeout(t *testing.T) {
+	var node yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte("name: t\ntarget: localhost:9500\ntimeout: 2s\n"), &node))
+	tr, err := factory(node, nil)
+	require.NoError(t, err)
+	gt := tr.(*GRPCTransform)
+	t.Cleanup(func() { _ = gt.Close() })
+	require.Equal(t, 2*time.Second, gt.timeout)
 }
 
 func TestName(t *testing.T) {
