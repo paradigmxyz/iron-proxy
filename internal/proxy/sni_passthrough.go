@@ -37,6 +37,13 @@ func (p *Proxy) handleSNIPassthrough(clientConn net.Conn) {
 // upstream port is fixed at 443 — a client-supplied CONNECT port is ignored
 // so an attacker cannot pivot an allowlisted hostname onto a different port.
 func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
+	return p.servePassthrough(clientConn, nil)
+}
+
+// servePassthrough is serveSNIPassthrough with an optional sniAllowed filter.
+// When non-nil, an SNI it rejects is refused with 403 before the pipeline runs
+// and before any upstream dial.
+func (p *Proxy) servePassthrough(clientConn net.Conn, sniAllowed func(sni string) bool) error {
 	defer clientConn.Close()
 
 	sni, peeked, err := peekSNI(clientConn, sniPeekTimeout)
@@ -63,6 +70,13 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 		result.Action = transform.ActionReject
 		result.StatusCode = http.StatusBadRequest
 		result.Err = fmt.Errorf("client hello missing sni")
+		return result.Err
+	}
+
+	if sniAllowed != nil && !sniAllowed(sni) {
+		result.Action = transform.ActionReject
+		result.StatusCode = http.StatusForbidden
+		result.Err = fmt.Errorf("sni %q is not in tls.passthrough_hosts", sni)
 		return result.Err
 	}
 

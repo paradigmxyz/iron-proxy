@@ -598,3 +598,49 @@ tls:
 		require.Contains(t, err.Error(), "control_plane.poll_interval must be positive")
 	})
 }
+
+func TestLoad_TLSPassthroughHosts(t *testing.T) {
+	tests := []struct {
+		name    string
+		tls     string
+		wantErr string
+		want    []string
+	}{
+		{
+			name: "mitm with hosts and glob",
+			tls:  "mode: mitm\n  ca_cert: /c\n  ca_key: /k\n  passthrough_hosts: [\"api.example.com\", \"*.example.org\"]",
+			want: []string{"api.example.com", "*.example.org"},
+		},
+		{
+			name: "unset is fine",
+			tls:  "mode: mitm\n  ca_cert: /c\n  ca_key: /k",
+		},
+		{
+			name:    "empty entry rejected",
+			tls:     "mode: mitm\n  ca_cert: /c\n  ca_key: /k\n  passthrough_hosts: [\"a.example.com\", \" \"]",
+			wantErr: "tls.passthrough_hosts[1] must not be empty",
+		},
+		{
+			name:    "lone wildcard rejected",
+			tls:     "mode: mitm\n  ca_cert: /c\n  ca_key: /k\n  passthrough_hosts: [\"*\"]",
+			wantErr: "tls.passthrough_hosts[0] must not be \"*\"",
+		},
+		{
+			name:    "sni-only rejected as redundant",
+			tls:     "mode: sni-only\n  passthrough_hosts: [\"a.example.com\"]",
+			wantErr: "redundant",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Load(strings.NewReader("dns:\n  proxy_ip: \"10.0.0.1\"\ntls:\n  " + tc.tls + "\n"))
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, cfg.TLS.PassthroughHosts)
+		})
+	}
+}

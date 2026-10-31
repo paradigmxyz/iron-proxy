@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -144,6 +145,13 @@ type TLS struct {
 	CAKey               string `yaml:"ca_key"`
 	CertCacheSize       int    `yaml:"cert_cache_size"`
 	LeafCertExpiryHours int    `yaml:"leaf_cert_expiry_hours"`
+
+	// PassthroughHosts lists hosts (domain globs such as "*.example.com")
+	// whose CONNECT/SOCKS5 tunnel TLS is passed through unopened after the
+	// SNI check, exactly like sni-only mode, while all other hosts stay
+	// MITM'd. For clients that ignore the system trust store. Only valid in
+	// mitm mode; the HTTPS listener is not affected.
+	PassthroughHosts []string `yaml:"passthrough_hosts"`
 }
 
 // TLS mode values.
@@ -299,6 +307,20 @@ func Validate(cfg *Config) error {
 		// CA cert/key are ignored in sni-only mode; no requirement.
 	default:
 		return fmt.Errorf("tls.mode must be %q or %q; got %q", TLSModeMITM, TLSModeSNIOnly, cfg.TLS.Mode)
+	}
+
+	if len(cfg.TLS.PassthroughHosts) > 0 {
+		if cfg.TLS.Mode == TLSModeSNIOnly {
+			return fmt.Errorf("tls.passthrough_hosts is redundant with tls.mode %q (every host is already passed through); remove it", TLSModeSNIOnly)
+		}
+		for i, h := range cfg.TLS.PassthroughHosts {
+			switch strings.TrimSpace(h) {
+			case "":
+				return fmt.Errorf("tls.passthrough_hosts[%d] must not be empty", i)
+			case "*":
+				return fmt.Errorf("tls.passthrough_hosts[%d] must not be \"*\"; use tls.mode %q to pass every host through", i, TLSModeSNIOnly)
+			}
+		}
 	}
 
 	if _, err := parseLogLevel(cfg.Log.Level); err != nil {

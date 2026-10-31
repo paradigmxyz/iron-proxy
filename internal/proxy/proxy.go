@@ -22,6 +22,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
+	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
@@ -38,6 +39,7 @@ type Proxy struct {
 	httpsServer          *http.Server
 	httpsAddr            string
 	tlsMode              string
+	passthroughHosts     *hostmatch.Matcher // nil when tls.passthrough_hosts is unset
 	tlsListener          net.Listener
 	tunnelAddr           string
 	tunnelListener       net.Listener
@@ -72,12 +74,15 @@ type Options struct {
 	HTTPSAddr  string
 	TunnelAddr string
 	TLSMode    string
-	CertCache  *certcache.Cache // required when TLSMode == config.TLSModeMITM
-	Pipeline   *transform.PipelineHolder
-	Resolver   *net.Resolver
-	Guard      *dnsguard.Guard   // nil is treated as an empty (no-op) guard
-	MCPPolicy  *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
-	MCPGateway *mcpgateway.Holder
+	// TLSPassthroughHosts lists hosts (domain globs) whose tunnel TLS is passed
+	// through unopened in mitm mode. See config.TLS.PassthroughHosts.
+	TLSPassthroughHosts []string
+	CertCache           *certcache.Cache // required when TLSMode == config.TLSModeMITM
+	Pipeline            *transform.PipelineHolder
+	Resolver            *net.Resolver
+	Guard               *dnsguard.Guard   // nil is treated as an empty (no-op) guard
+	MCPPolicy           *mcp.PolicyHolder // optional MCP-aware policy interceptor; nil disables MCP handling
+	MCPGateway          *mcpgateway.Holder
 	// ResponseRetryHandler may add headers and replay the exact transformed
 	// request once after selected upstream response statuses.
 	ResponseRetryHandler *responseretry.Handler
@@ -98,6 +103,23 @@ type Options struct {
 	Ready func() bool
 }
 
+// newPassthroughMatcher builds the matcher for tls.passthrough_hosts, or nil
+// when the list is empty.
+func newPassthroughMatcher(hosts []string) *hostmatch.Matcher {
+	if len(hosts) == 0 {
+		return nil
+	}
+	// hostmatch.New only fails on CIDR parsing and none are passed here.
+	m, _ := hostmatch.New(hosts, nil)
+	return m
+}
+
+// isPassthroughHost reports whether host (port already stripped) is listed in
+// tls.passthrough_hosts.
+func (p *Proxy) isPassthroughHost(host string) bool {
+	return p.passthroughHosts != nil && p.passthroughHosts.Matches(host)
+}
+
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
 // TLSModeSNIOnly, certCache is unused and may be nil.
 func New(opts Options) *Proxy {
@@ -113,6 +135,7 @@ func New(opts Options) *Proxy {
 		ready:                opts.Ready,
 		httpsAddr:            opts.HTTPSAddr,
 		tlsMode:              opts.TLSMode,
+		passthroughHosts:     newPassthroughMatcher(opts.TLSPassthroughHosts),
 		tunnelAddr:           opts.TunnelAddr,
 		tunnelDone:           make(chan struct{}),
 		certCache:            opts.CertCache,
