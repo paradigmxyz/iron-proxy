@@ -7,12 +7,20 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 )
 
 // applyEnvOverrides layers IRON_* environment variables on top of an existing
 // Config. Only non-empty environment variables override the corresponding field.
 func applyEnvOverrides(cfg *Config) error {
+	if raw := os.Getenv("IRON_SSH_CONFIG_JSON"); raw != "" {
+		if yaml.Unmarshal([]byte(raw), &cfg.SSH) != nil {
+			return fmt.Errorf("IRON_SSH_CONFIG_JSON is invalid")
+		}
+	}
+
 	if v := os.Getenv("IRON_DNS_ENABLED"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
