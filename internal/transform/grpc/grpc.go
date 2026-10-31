@@ -138,6 +138,7 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: marshaling request: %w", g.name, err)
 	}
+	applyTunnelCredential(pbReq, tctx)
 
 	resp, err := g.client.TransformRequest(ctx, &transformv1.TransformRequestRequest{
 		Context: transformContextToProto(tctx),
@@ -175,6 +176,7 @@ func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.T
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: marshaling request: %w", g.name, err)
 	}
+	applyTunnelCredential(pbReq, tctx)
 	pbResp, err := httpResponseToProto(resp, g.sendResponseBody)
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: marshaling response: %w", g.name, err)
@@ -214,6 +216,21 @@ func (g *GRPCTransform) Close() error {
 }
 
 // --- proto conversion helpers ---
+
+// applyTunnelCredential re-presents the tunnel's CONNECT credential to the
+// server on inner requests, so each request is checked against a live
+// credential rather than the decision made once at CONNECT. It overwrites any
+// Proxy-Authorization the inner request carried, since the tunnel's is the one
+// the server validated. Only the proto is modified; req.Header is untouched.
+func applyTunnelCredential(pbReq *transformv1.HttpRequest, tctx *transform.TransformContext) {
+	if tctx == nil || tctx.Tunnel == nil || tctx.Tunnel.Credential == "" {
+		return
+	}
+	if pbReq.Headers == nil {
+		pbReq.Headers = make(map[string]*transformv1.HeaderValues, 1)
+	}
+	pbReq.Headers["Proxy-Authorization"] = &transformv1.HeaderValues{Values: []string{tctx.Tunnel.Credential}}
+}
 
 func transformContextToProto(tctx *transform.TransformContext) *transformv1.TransformContext {
 	pb := &transformv1.TransformContext{

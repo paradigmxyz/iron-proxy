@@ -337,6 +337,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	return true, nil, &transform.TunnelInfo{
 		Target:            target,
 		RequestTransforms: result.RequestTransforms,
+		Credential:        connectHeaders.Get("Proxy-Authorization"),
 	}
 }
 
@@ -451,6 +452,7 @@ func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
 	return &transform.TunnelInfo{
 		Target:            info.Target,
 		RequestTransforms: traces,
+		Credential:        info.Credential,
 	}
 }
 
