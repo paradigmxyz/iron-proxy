@@ -111,6 +111,10 @@ type Proxy struct {
 	// at connect time against the resolved address. When unset, a secure
 	// default (IMDS + loopback) is applied; set to an empty list to disable.
 	UpstreamDenyCIDRs CIDRList `yaml:"upstream_deny_cidrs"`
+	// UpstreamPrivateExceptions permits an otherwise denied resolved IP only
+	// for the exact original hostname and listed CIDR. This is intended for a
+	// named, managed private upstream without relaxing the denylist globally.
+	UpstreamPrivateExceptions map[string][]string `yaml:"upstream_private_exceptions"`
 	// UpstreamProxy routes iron-proxy's own outbound connections through an
 	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
 	// NO_PROXY environment variables override these fields when set.
@@ -314,6 +318,9 @@ func Validate(cfg *Config) error {
 
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
 		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
+	}
+	if err := dnsguard.ValidateExceptions(cfg.Proxy.UpstreamPrivateExceptions); err != nil {
+		return fmt.Errorf("proxy.upstream_private_exceptions: %w", err)
 	}
 
 	if cfg.Management.Listen != "" {

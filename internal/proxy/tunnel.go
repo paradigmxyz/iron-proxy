@@ -51,6 +51,11 @@ func (p *Proxy) listenTunnel() error {
 // handleTunnel peeks at the first byte to dispatch to HTTP proxy or SOCKS5.
 // This is the single logging point for tunnel connection errors.
 func (p *Proxy) handleTunnel(conn net.Conn) {
+	if err := conn.SetReadDeadline(time.Now().Add(p.tunnelHandshakeTimeout)); err != nil {
+		p.logger.Debug("tunnel deadline error", slog.String("error", err.Error()))
+		_ = conn.Close()
+		return
+	}
 	br := bufio.NewReader(conn)
 	first, err := br.Peek(1)
 	if err != nil {
@@ -78,7 +83,7 @@ func (p *Proxy) handleTunnel(conn net.Conn) {
 // CONNECT establishes a tunnel; all other methods are forwarded through the
 // normal HTTP proxy path.
 func (p *Proxy) serveTunnelProxyHTTP(conn net.Conn) error {
-	return serveOneHTTPConn(conn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return p.serveOneHTTPConn(conn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
 			p.handleTunnelCONNECT(w, r)
 			return
@@ -349,6 +354,9 @@ func (p *Proxy) serveTunnel(clientConn net.Conn, target string, tunnelInfo *tran
 }
 
 func (p *Proxy) serveTunnelWithReader(clientConn net.Conn, br *bufio.Reader, target string, tunnelInfo *transform.TunnelInfo) error {
+	if err := clientConn.SetReadDeadline(time.Now().Add(p.tunnelHandshakeTimeout)); err != nil {
+		return fmt.Errorf("set tunneled protocol deadline: %w", err)
+	}
 	first, err := br.Peek(1)
 	if err != nil {
 		return fmt.Errorf("peek client protocol: %w", err)
@@ -385,11 +393,16 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *t
 	})
 	defer func() { _ = tlsConn.Close() }()
 
-	if err := tlsConn.HandshakeContext(context.Background()); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), p.tunnelHandshakeTimeout)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return fmt.Errorf("TLS handshake for %s: %w", target, err)
 	}
+	if err := tlsConn.SetReadDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear TLS handshake deadline for %s: %w", target, err)
+	}
 
-	return serveOneHTTPConn(tlsConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return p.serveOneHTTPConn(tlsConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handleHTTP(w, r, tunnelInfo)
 	}))
 }
@@ -398,12 +411,12 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *t
 func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string, tunnelInfo *transform.TunnelInfo) error {
 	defer clientConn.Close()
 
-	return serveOneHTTPConn(clientConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return p.serveOneHTTPConn(clientConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handleHTTP(w, r, tunnelInfo)
 	}))
 }
 
-func serveOneHTTPConn(conn net.Conn, handler http.Handler) error {
+func (p *Proxy) serveOneHTTPConn(conn net.Conn, handler http.Handler) error {
 	ln := newOneConnListener(conn)
 	var hijacked atomic.Bool
 	var handlers sync.WaitGroup
@@ -413,8 +426,9 @@ func serveOneHTTPConn(conn net.Conn, handler http.Handler) error {
 			defer handlers.Done()
 			handler.ServeHTTP(w, r)
 		}),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       10 * time.Second,
+		ReadHeaderTimeout: p.downstreamReadHeaderTimeout,
+		ReadTimeout:       p.downstreamReadTimeout,
+		IdleTimeout:       p.downstreamIdleTimeout,
 		ConnState: func(_ net.Conn, state http.ConnState) {
 			if state == http.StateHijacked {
 				hijacked.Store(true)
