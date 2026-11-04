@@ -6,9 +6,8 @@ tools.
 
 ## Repo at a glance
 
-- Main Go module: `github.com/ironsh/iron-proxy` (version in `go.mod`).
-- One binary: `cmd/iron-proxy`, with an opt-in SSH listener in `internal/sshproxy/`.
-- The module uses sshpiper's crypto replacement for SSH transport support.
+- Single Go module: `github.com/ironsh/iron-proxy` (Go 1.26+).
+- One binary: `cmd/iron-proxy` (the MITM egress proxy).
 - Core packages live under `internal/`. The transform pipeline lives in
   `internal/transform/` with one subpackage per transform
   (`allowlist`, `secrets`, `bodycapture`, `headerallowlist`, `annotate`,
