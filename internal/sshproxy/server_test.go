@@ -45,8 +45,9 @@ func key(t *testing.T) (ssh.Signer, []byte) {
 }
 
 // testBackend is a real SSH server that accepts only userKey as user "dev".
-// exec replies "ok:<command>" with exit status 7; "hold" blocks on stdin and
-// "stream-output" writes 12 MiB. The sftp subsystem serves a temp directory.
+// exec replies "ok:<command>" with exit status 7; "hold" blocks on stdin,
+// "eof-then-hold" sends output and EOF then blocks, and "stream-output"
+// writes 12 MiB. The sftp subsystem serves a temp directory.
 func testBackend(t *testing.T, host, userKey ssh.Signer) string {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -109,6 +110,12 @@ func serveBackendSession(stream ssh.Channel, reqs <-chan *ssh.Request, root stri
 				return
 			}
 			if cmd.Command == "hold" {
+				_, _ = io.Copy(io.Discard, stream)
+				return
+			}
+			if cmd.Command == "eof-then-hold" {
+				_, _ = stream.Write([]byte("partial"))
+				_ = stream.CloseWrite()
 				_, _ = io.Copy(io.Discard, stream)
 				return
 			}
@@ -596,16 +603,103 @@ func TestLeaseExpiryInterruptsBlockedRenewal(t *testing.T) {
 }
 
 func TestHTTPAuthorizationUsesProxyTokenAndDoesNotLeakErrors(t *testing.T) {
-	var gotAuth atomic.Value
-	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth.Store(r.Header.Get("Authorization"))
-		http.Error(w, "test-upstream-secret", http.StatusForbidden)
-	}))
-	defer controller.Close()
-	_, err := HTTPAuthorizer(controller.URL, "test-only-token")(context.Background(), Authorization{Route: "ee"})
-	require.ErrorIs(t, err, errAccessDenied)
-	require.NotContains(t, err.Error(), "test-upstream-secret")
-	require.Equal(t, "Bearer test-only-token", gotAuth.Load())
+	cases := []struct {
+		status int
+		denied bool
+	}{
+		{http.StatusUnauthorized, true},
+		{http.StatusForbidden, true},
+		{http.StatusServiceUnavailable, false},
+		{http.StatusNotFound, false},
+	}
+	for _, tc := range cases {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			var gotAuth atomic.Value
+			controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth.Store(r.Header.Get("Authorization"))
+				http.Error(w, "test-upstream-secret", tc.status)
+			}))
+			defer controller.Close()
+			_, err := HTTPAuthorizer(controller.URL, "test-only-token")(context.Background(), Authorization{Route: "ee"})
+			require.Error(t, err)
+			require.Equal(t, tc.denied, errors.Is(err, errAccessDenied))
+			require.NotContains(t, err.Error(), "test-upstream-secret")
+			require.Equal(t, "Bearer test-only-token", gotAuth.Load())
+		})
+	}
+}
+
+func TestUpstreamEOFReachesClientBeforeClose(t *testing.T) {
+	clientKey, _ := key(t)
+	proxyHost, _ := key(t)
+	g := backendFixture(t)
+	address, _ := testProxy(t, clientKey, proxyHost, func(context.Context, Authorization) (*Grant, error) { return g, nil }, nil)
+	client, err := connect(address, clientKey, proxyHost)
+	require.NoError(t, err)
+	defer func() { _ = client.Close() }()
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+	stdout, err := session.StdoutPipe()
+	require.NoError(t, err)
+	// Hold stdin open so the backend keeps the channel open after its EOF.
+	stdin, err := session.StdinPipe()
+	require.NoError(t, err)
+	defer func() { _ = stdin.Close() }()
+	require.NoError(t, session.Start("eof-then-hold"))
+	read := make(chan []byte, 1)
+	go func() {
+		data, _ := io.ReadAll(stdout) // the assertion below covers the content
+		read <- data
+	}()
+	select {
+	case data := <-read:
+		require.Equal(t, "partial", string(data))
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream EOF was not relayed while the channel stayed open")
+	}
+}
+
+// deafConn stops delivering inbound bytes once deaf is set, like a peer whose
+// network silently dropped. It still reports EOF when the proxy hangs up.
+type deafConn struct {
+	net.Conn
+	deaf atomic.Bool
+}
+
+func (c *deafConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	for c.deaf.Load() && err == nil {
+		n, err = c.Conn.Read(p)
+	}
+	return n, err
+}
+
+func TestUnresponsiveClientIsDisconnected(t *testing.T) {
+	clientKey, _ := key(t)
+	proxyHost, _ := key(t)
+	g := backendFixture(t)
+	address, _ := serveProxy(t, &Server{HostKey: proxyHost, ClientPublicKey: clientKey.PublicKey(), Authorize: func(context.Context, Authorization) (*Grant, error) { return g, nil }, KeepaliveInterval: 20 * time.Millisecond})
+	raw, err := net.Dial("tcp", address)
+	require.NoError(t, err)
+	conn := &deafConn{Conn: raw}
+	c, chans, reqs, err := ssh.NewClientConn(conn, address, &ssh.ClientConfig{User: "ee", Auth: []ssh.AuthMethod{ssh.PublicKeys(clientKey)}, HostKeyCallback: ssh.FixedHostKey(proxyHost.PublicKey()), Timeout: time.Second})
+	require.NoError(t, err)
+	client := ssh.NewClient(c, chans, reqs)
+	defer func() { _ = client.Close() }()
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	require.NoError(t, session.Start("hold"))
+
+	conn.deaf.Store(true)
+	done := make(chan error, 1)
+	go func() { done <- client.Wait() }()
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy kept a silent client's session open")
+	}
 }
 
 func TestOpenSSHBookkeepingDoesNotDisconnect(t *testing.T) {

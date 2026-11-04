@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -65,8 +66,13 @@ func HTTPAuthorizer(endpoint, token string) Authorizer {
 			return nil, errors.New("authorization unavailable")
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
+		switch resp.StatusCode {
+		case http.StatusOK:
+		case http.StatusUnauthorized, http.StatusForbidden:
 			return nil, errAccessDenied
+		default:
+			// Outages are operational errors, not policy denials.
+			return nil, fmt.Errorf("authorization unavailable: status %d", resp.StatusCode)
 		}
 		// JSON is decoded as YAML so source nodes retain the existing resolver contract.
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

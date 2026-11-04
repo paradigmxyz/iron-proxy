@@ -33,6 +33,8 @@ type Server struct {
 	Logger           *slog.Logger
 	RenewalInterval  time.Duration
 	HandshakeTimeout time.Duration
+	// KeepaliveInterval paces liveness probes to both peers; 0 means 15s.
+	KeepaliveInterval time.Duration
 }
 
 // session is one authorized upstream connection.
@@ -137,6 +139,8 @@ func (s *Server) handle(parent context.Context, conn net.Conn) {
 	// Wait's error only says why upstream closed; either way the session ends.
 	run(func() { _ = sess.conn.Wait(); cancel() })
 	run(func() { s.renew(ctx, cancel, sess.auth, sess.grant) })
+	run(func() { s.keepalive(ctx, cancel, downstream) })
+	run(func() { s.keepalive(ctx, cancel, sess.conn) })
 	// Global requests (forwarding, keepalives) are refused in both directions.
 	run(func() { ssh.DiscardRequests(reqs) })
 	run(func() { ssh.DiscardRequests(sess.reqs) })
@@ -167,24 +171,33 @@ func (s *Server) bridge(nc ssh.NewChannel, sess *session, remote string) {
 	}
 	down, downReqs, err := nc.Accept()
 	if err != nil {
+		// Keep upstream requests from stalling the connection until it closes.
+		go ssh.DiscardRequests(upReqs)
 		_ = up.Close()
 		return
 	}
-	// Upstream output, including exit-status requests, must be delivered
-	// before the downstream channel closes.
+	// Upstream EOF is relayed once both streams drain, and the downstream
+	// channel closes only after exit-status requests are delivered.
 	var output sync.WaitGroup
-	output.Add(3)
+	output.Add(2)
 	go func() { defer output.Done(); _, _ = io.Copy(down, up) }()
 	go func() { defer output.Done(); _, _ = io.Copy(down.Stderr(), up.Stderr()) }()
+	requests := make(chan struct{})
 	go func() {
-		defer output.Done()
+		defer close(requests)
 		for req := range upReqs {
 			ok, _ := down.SendRequest(req.Type, req.WantReply, req.Payload) // a send failure means the client is gone; report false
 			_ = req.Reply(ok, nil)                                          // upstream channel may already be closed
 		}
 	}()
 	closed := make(chan struct{})
-	go func() { defer close(closed); output.Wait(); _ = down.Close() }()
+	go func() {
+		defer close(closed)
+		output.Wait()
+		_ = down.CloseWrite() // fails only if the channel is already closed
+		<-requests
+		_ = down.Close()
+	}()
 	input := make(chan struct{})
 	go func() { defer close(input); _, _ = io.Copy(up, down); _ = up.CloseWrite() }()
 
@@ -346,6 +359,46 @@ func parseRoute(value string) (string, string, error) {
 		return "", "", errors.New("invalid SSH route")
 	}
 	return value, "", nil
+}
+
+// keepalive ends the session when conn stops answering global requests, so a
+// silently dropped peer cannot hold the other side open. Any reply counts.
+func (s *Server) keepalive(ctx context.Context, cancel context.CancelFunc, conn ssh.Conn) {
+	interval := s.KeepaliveInterval
+	if interval == 0 {
+		interval = 15 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		reply := make(chan error, 1)
+		go func() {
+			_, _, err := conn.SendRequest("keepalive@openssh.com", true, nil)
+			reply <- err
+		}()
+		// Like OpenSSH's default ServerAliveCountMax, allow three intervals.
+		timer := time.NewTimer(3 * interval)
+		select {
+		case err := <-reply:
+			timer.Stop()
+			if err != nil {
+				cancel()
+				return
+			}
+		case <-timer.C:
+			s.Logger.Warn("SSH peer stopped responding", slog.String("remote_addr", conn.RemoteAddr().String()))
+			cancel()
+			return
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		}
+	}
 }
 
 func (s *Server) renew(ctx context.Context, cancel context.CancelFunc, a Authorization, g *Grant) {

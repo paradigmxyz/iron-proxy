@@ -27,7 +27,8 @@ the proxy token and return a grant containing `id`, `principal`, `generation`,
 `destination` (`tcp://host:port` or a full `wss://host/path`), `username`,
 `host_key` (authorized-key format), `private_key` (Iron secret source), and
 `expires_at` (RFC3339, at most 15 minutes away). It must deny ambiguous or
-unauthorized routes. Responses are limited to 1 MiB; errors never expose their
+unauthorized routes with HTTP 401 or 403; other non-200 statuses are audited as
+authorizer errors. Responses are limited to 1 MiB; errors never expose their
 bodies or credential values. Redirects are not followed.
 
 The client must prove possession of the paired key before authorization or
@@ -45,7 +46,8 @@ The JWT is protocol metadata, not an authentication credential.
 
 The lease is renewed every five seconds. Expiry, authorization failure, or a
 change to any grant field except expiry closes the active connection. Authorizer
-failures fail closed. Reconnection never retries a remote command automatically.
+failures fail closed. Both peers are probed with keepalives every 15 seconds,
+and a peer that misses three intervals closes the connection. Reconnection never retries a remote command automatically.
 A terminated channel does not guarantee detached remote descendants have exited.
 
 Run `go test -race ./internal/sshproxy`. No SSH functionality is enabled merely
