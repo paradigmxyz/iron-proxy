@@ -262,7 +262,12 @@ func (s *Server) connect(ctx context.Context, user string, key ssh.PublicKey, de
 			return nil
 		},
 	}
+	// NewClientConn ignores ctx; shutdown or revocation must still interrupt it.
+	stop := context.AfterFunc(ctx, func() { _ = netConn.Close() })
 	conn, chans, reqs, err := ssh.NewClientConn(netConn, grant.Destination, config)
+	if !stop() {
+		err = errors.Join(err, ctx.Err())
+	}
 	if err != nil {
 		_ = netConn.Close()
 		return sess, fmt.Errorf("SSH upstream login failed: %w", err)
