@@ -1,4 +1,4 @@
-// Command iron-proxy runs HTTP/HTTPS, DNS, and optional Postgres and SSH listeners.
+// Command iron-proxy runs the MITM HTTP/HTTPS proxy with built-in DNS server.
 package main
 
 import (
@@ -29,7 +29,6 @@ import (
 	"github.com/ironsh/iron-proxy/internal/postgres"
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
-	"github.com/ironsh/iron-proxy/internal/sshproxy"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/version"
 
@@ -61,7 +60,6 @@ func main() {
 	}
 
 	configPath := flag.String("config", "", "path to iron-proxy YAML config file")
-	requireSSH := flag.Bool("ssh", false, "require SSH configuration at startup")
 	tokenFlag := flag.String("token", "", "control plane bearer token (managed mode)")
 	flag.Parse()
 
@@ -79,22 +77,6 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
-	}
-
-	sshServer, sshListener, err := sshproxy.LoadFromNode(ctx, cfg.SSH, logger)
-	if err == nil && *requireSSH && sshServer == nil {
-		err = fmt.Errorf("SSH configuration required")
-	}
-	if err != nil {
-		logger.Error("initializing SSH listener", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-	if sshListener != nil {
-		defer func() {
-			if err := sshListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-				logger.Error("closing SSH listener", slog.String("error", err.Error()))
-			}
-		}()
 	}
 
 	// CLI flag takes precedence over environment variable.
@@ -126,7 +108,7 @@ func main() {
 
 	// errc collects fatal errors from all background goroutines: servers
 	// and (in managed mode) the config poller.
-	errc := make(chan error, 6)
+	errc := make(chan error, 5)
 
 	// The postgres listener comes from the local YAML postgres: block
 	// (self-managed proxies, inline DSNs) and, in managed mode, has additional
@@ -290,17 +272,6 @@ func main() {
 		mgmtServer = management.New(mgmtOpts)
 	}
 
-	var sshDone chan struct{}
-	if sshServer != nil {
-		sshDone = make(chan struct{})
-		go func() {
-			defer close(sshDone)
-			if err := sshServer.Serve(ctx, sshListener); err != nil {
-				errc <- fmt.Errorf("ssh: %w", err)
-			}
-		}()
-	}
-
 	// Start services.
 	if dnsServer != nil {
 		go func() { errc <- fmt.Errorf("dns: %w", dnsServer.ListenAndServe()) }()
@@ -370,14 +341,6 @@ func main() {
 	}
 	if err := pgManager.Shutdown(shutdownCtx); err != nil {
 		logger.Error("postgres server shutdown error", slog.String("error", err.Error()))
-	}
-
-	if sshDone != nil {
-		select {
-		case <-sshDone:
-		case <-shutdownCtx.Done():
-			logger.Error("SSH shutdown timed out")
-		}
 	}
 
 	logger.Info("iron-proxy stopped")
