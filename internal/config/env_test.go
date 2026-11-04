@@ -428,6 +428,7 @@ func setEnvs(t *testing.T, envs map[string]string) {
 
 	// Clear all IRON_* env vars to prevent cross-test leakage.
 	ironKeys := []string{
+		"IRON_SSH_CONFIG_JSON",
 		"IRON_DNS_ENABLED",
 		"IRON_DNS_LISTEN",
 		"IRON_DNS_PROXY_IP",
@@ -453,4 +454,18 @@ func setEnvs(t *testing.T, envs map[string]string) {
 	for k, v := range envs {
 		t.Setenv(k, v)
 	}
+}
+
+func TestSSHEnvironmentConfig(t *testing.T) {
+	setEnvs(t, map[string]string{"IRON_SSH_CONFIG_JSON": `{"listen":"127.0.0.1:2222"}`})
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	var ssh struct {
+		Listen string `yaml:"listen"`
+	}
+	require.NoError(t, cfg.SSH.Decode(&ssh))
+	require.Equal(t, "127.0.0.1:2222", ssh.Listen)
+	t.Setenv("IRON_SSH_CONFIG_JSON", "sensitive-value: [")
+	_, err = LoadConfig("")
+	require.EqualError(t, err, "IRON_SSH_CONFIG_JSON is invalid")
 }
