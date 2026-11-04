@@ -78,7 +78,7 @@ func testBackend(t *testing.T, host, userKey ssh.Signer) string {
 				if err != nil {
 					return // some tests provoke handshake failures on purpose
 				}
-				defer server.Close()
+				defer func() { _ = server.Close() }()
 				go ssh.DiscardRequests(requests)
 				for channel := range channels {
 					if channel.ChannelType() != "session" {
@@ -100,7 +100,7 @@ func testBackend(t *testing.T, host, userKey ssh.Signer) string {
 // Errors are ignored below: this is the test peer, and failures surface as
 // assertion failures in the client.
 func serveBackendSession(stream ssh.Channel, reqs <-chan *ssh.Request, root string) {
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	for req := range reqs {
 		switch req.Type {
 		case "exec":
@@ -248,7 +248,7 @@ func TestExecSFTPAndKeyIsolation(t *testing.T) {
 	address, _ := testProxy(t, clientKey, proxyHost, auth.authorize, nil)
 	client, err := connect(address, clientKey, proxyHost)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	session, err := client.NewSession()
 	require.NoError(t, err)
 	output, err := session.Output("test-command")
@@ -258,7 +258,7 @@ func TestExecSFTPAndKeyIsolation(t *testing.T) {
 	require.Equal(t, "ok:test-command", string(output))
 	files, err := sftp.NewClient(client)
 	require.NoError(t, err)
-	defer files.Close()
+	defer func() { _ = files.Close() }()
 	remote, err := files.Create("fixture.txt")
 	require.NoError(t, err)
 	_, err = remote.Write([]byte("edited"))
@@ -289,7 +289,7 @@ func TestRefusalsAreAuditedAndKeepConnection(t *testing.T) {
 	address, audits := testProxy(t, clientKey, proxyHost, auth.authorize, nil)
 	client, err := connect(address, clientKey, proxyHost)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	refused, err := client.NewSession()
 	require.NoError(t, err)
@@ -407,7 +407,7 @@ func TestRevocationClosesActiveConnection(t *testing.T) {
 	}, nil)
 	client, err := connect(address, clientKey, proxyHost)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	session, err := client.NewSession()
 	require.NoError(t, err)
 	require.NoError(t, session.Start("hold"))
@@ -439,7 +439,7 @@ func TestWstunnelV11Handshake(t *testing.T) {
 			return
 		}
 		stream := &websocketConn{Conn: conn, reader: buffered}
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 		upstream, err := net.Dial("tcp", target)
 		if err != nil {
 			return
@@ -456,7 +456,7 @@ func TestWstunnelV11Handshake(t *testing.T) {
 	address, _ := testProxy(t, clientKey, proxyHost, func(context.Context, Authorization) (*Grant, error) { return g, nil }, roots)
 	client, err := connect(address, clientKey, proxyHost)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	session, err := client.NewSession()
 	require.NoError(t, err)
 	output, err := session.Output("websocket")
@@ -489,7 +489,7 @@ func TestWstunnelV11Handshake(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 			session, err := client.NewSession()
 			require.NoError(t, err)
 			output, err := session.Output("dynamic")
@@ -615,7 +615,7 @@ func TestOpenSSHBookkeepingDoesNotDisconnect(t *testing.T) {
 	address, _ := testProxy(t, clientKey, proxyHost, func(context.Context, Authorization) (*Grant, error) { return g, nil }, nil)
 	client, err := connect(address, clientKey, proxyHost)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	for _, request := range []string{"keepalive@openssh.com", "tcpip-forward"} {
 		ok, _, err := client.SendRequest(request, true, nil)
 		require.NoError(t, err)
@@ -623,7 +623,7 @@ func TestOpenSSHBookkeepingDoesNotDisconnect(t *testing.T) {
 	}
 	channel, requests, err := client.OpenChannel("session", nil)
 	require.NoError(t, err)
-	defer channel.Close()
+	defer func() { _ = channel.Close() }()
 	go ssh.DiscardRequests(requests)
 	for _, request := range []string{"env", "eow@openssh.com"} {
 		_, err := channel.SendRequest(request, false, nil)
@@ -644,10 +644,10 @@ func TestKeepalivesDuringServerOutput(t *testing.T) {
 	address, _ := testProxy(t, clientKey, proxyHost, func(context.Context, Authorization) (*Grant, error) { return g, nil }, nil)
 	client, err := connect(address, clientKey, proxyHost)
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	session, err := client.NewSession()
 	require.NoError(t, err)
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	output, err := session.StdoutPipe()
 	require.NoError(t, err)
 	require.NoError(t, session.Start("stream-output"))

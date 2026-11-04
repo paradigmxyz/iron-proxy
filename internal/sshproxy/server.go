@@ -121,7 +121,7 @@ func (s *Server) handle(parent context.Context, conn net.Conn) {
 		}
 		return
 	}
-	defer downstream.Close()
+	defer func() { _ = downstream.Close() }() // teardown; the connection is usually already closed
 	if conn.SetDeadline(time.Time{}) != nil {
 		return
 	}
