@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/config"
+	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/transform"
 	"golang.org/x/net/http2"
 )
@@ -285,7 +286,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	req.Body = transform.NewBufferedBody(http.NoBody, 0)
 
 	mode := transform.ModeMITM
-	if p.tlsMode == config.TLSModeSNIOnly {
+	if p.tlsMode == config.TLSModeSNIOnly || p.isPassthroughHost(hostmatch.StripPort(target)) {
 		mode = transform.ModeSNIOnly
 	}
 
@@ -373,10 +374,16 @@ func (p *Proxy) serveTunnelWithReader(clientConn net.Conn, br *bufio.Reader, tar
 // serveTunnelTLS handles the TLS branch of a tunnel connection. In MITM mode
 // it terminates TLS and serves HTTP via handleHTTP; in sni-only mode it
 // peeks SNI and TCP-passthroughs to the SNI host on port 443 (the CONNECT
-// port is ignored to prevent port-pivot attacks).
+// port is ignored to prevent port-pivot attacks). In MITM mode, hosts listed
+// in tls.passthrough_hosts take the same passthrough path.
 func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *transform.TunnelInfo) error {
 	if p.tlsMode == config.TLSModeSNIOnly {
 		return p.serveSNIPassthrough(clientConn)
+	}
+	if p.isPassthroughHost(hostmatch.StripPort(target)) {
+		// The SNI must be listed too: otherwise CONNECT to a listed host
+		// could reach an unlisted host unopened, bypassing MITM-level rules.
+		return p.servePassthrough(clientConn, p.isPassthroughHost)
 	}
 
 	tlsConn := tls.Server(clientConn, &tls.Config{

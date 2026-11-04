@@ -86,6 +86,12 @@ tls:
   # only thing that can match. Body-inspecting transforms like secrets and
   # grpc still run, but have nothing to act on.
   mode: "mitm"
+  # passthrough_hosts (mitm mode only): hosts whose CONNECT/SOCKS5 tunnel TLS
+  # is passed through unopened, like sni-only, for clients that ignore the
+  # system trust store. Globs allowed. Transforms see only the host for these
+  # (no method/path rules, no secrets). Does not affect the HTTPS listener.
+  # passthrough_hosts:
+  #   - "api.example.com"
   ca_cert: "/etc/iron-proxy/ca.crt"
   ca_key: "/etc/iron-proxy/ca.key"
   cert_cache_size: 1000
