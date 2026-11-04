@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/url"
@@ -21,17 +22,13 @@ import (
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
 )
 
-func transport(ctx context.Context, target string, deny []string, roots *x509.CertPool) (net.Conn, error) {
+func transport(ctx context.Context, target string, guard *dnsguard.Guard, roots *x509.CertPool) (net.Conn, error) {
 	// Bound TLS and HTTP upgrade negotiation too, not only the TCP dial.
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	u, err := url.Parse(target)
 	if err != nil || u.User != nil || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("invalid SSH destination")
-	}
-	guard, err := dnsguard.New(deny)
-	if err != nil {
-		return nil, errors.New("invalid upstream deny CIDRs")
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: guard.DialControl}
 	switch u.Scheme {
@@ -50,7 +47,7 @@ func transport(ctx context.Context, target string, deny []string, roots *x509.Ce
 		client := ws.Dialer{NetDial: dialer.DialContext, TLSConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, Timeout: 10 * time.Second, Protocols: []string{"v1", "authorization.bearer." + token}}
 		conn, buffered, handshake, err := client.Dial(ctx, target)
 		if err != nil {
-			return nil, errors.New("SSH WebSocket connection failed")
+			return nil, fmt.Errorf("SSH WebSocket connection failed: %w", err)
 		}
 		if handshake.Protocol != "v1" {
 			_ = conn.Close()

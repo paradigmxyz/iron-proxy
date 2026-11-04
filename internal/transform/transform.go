@@ -59,6 +59,10 @@ const (
 	// from a peeked TLS ClientHello SNI. Method, path, headers, and body are
 	// all empty; transforms that depend on them cannot function.
 	ModeSNIOnly
+
+	// ModeSSH means the event came from the SSH listener. Method carries the
+	// SSH operation and Path its detail (route, command, or subsystem).
+	ModeSSH
 )
 
 // String returns the canonical string form of the mode.
@@ -68,6 +72,8 @@ func (m Mode) String() string {
 		return "mitm"
 	case ModeSNIOnly:
 		return "sni-only"
+	case ModeSSH:
+		return "ssh"
 	default:
 		return "unknown"
 	}

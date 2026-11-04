@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
+	"github.com/ironsh/iron-proxy/internal/transform"
 	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
@@ -39,6 +40,9 @@ type Authorization struct {
 	Destination string `json:"destination,omitempty"`
 }
 
+// errAccessDenied marks policy rejections, as opposed to operational errors.
+var errAccessDenied = errors.New("SSH access denied")
+
 // Authorizer is called again during active connections; errors revoke access.
 type Authorizer func(context.Context, Authorization) (*Grant, error)
 
@@ -62,7 +66,7 @@ func HTTPAuthorizer(endpoint, token string) Authorizer {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, errors.New("SSH access denied")
+			return nil, errAccessDenied
 		}
 		// JSON is decoded as YAML so source nodes retain the existing resolver contract.
 		data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -95,7 +99,8 @@ func signer(ctx context.Context, node yaml.Node, logger *slog.Logger) (ssh.Signe
 
 // LoadFromNode prepares the optional SSH listener before other services start.
 // An absent block disables SSH. The real key and bearer token stay in the proxy.
-func LoadFromNode(ctx context.Context, node yaml.Node, logger *slog.Logger) (*Server, net.Listener, error) {
+// Upstream dials use the proxy-wide guard and audit events the shared sinks.
+func LoadFromNode(ctx context.Context, node yaml.Node, guard *dnsguard.Guard, audit transform.AuditFunc, logger *slog.Logger) (*Server, net.Listener, error) {
 	if node.Kind == 0 || node.Tag == "!!null" {
 		return nil, nil, nil
 	}
@@ -105,7 +110,6 @@ func LoadFromNode(ctx context.Context, node yaml.Node, logger *slog.Logger) (*Se
 		ClientPublicKey string    `yaml:"client_public_key"`
 		AuthorizeURL    string    `yaml:"authorize_url"`
 		TokenEnv        string    `yaml:"token_env"`
-		DenyCIDRs       []string  `yaml:"upstream_deny_cidrs"`
 	}
 	if node.Decode(&cfg) != nil || cfg.Listen == "" || cfg.AuthorizeURL == "" {
 		return nil, nil, errors.New("SSH listen address and authorization URL required")
@@ -124,13 +128,10 @@ func LoadFromNode(ctx context.Context, node yaml.Node, logger *slog.Logger) (*Se
 	if token == "" {
 		return nil, nil, errors.New("SSH proxy token unavailable")
 	}
-	if cfg.DenyCIDRs == nil {
-		cfg.DenyCIDRs = dnsguard.DefaultDenyCIDRs
-	}
 	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Listen)
 	if err != nil {
 		return nil, nil, errors.New("SSH listener unavailable")
 	}
-	server := &Server{HostKey: host, ClientPublicKey: key, Authorize: HTTPAuthorizer(cfg.AuthorizeURL, token), DenyCIDRs: cfg.DenyCIDRs, Logger: logger}
+	server := &Server{HostKey: host, ClientPublicKey: key, Authorize: HTTPAuthorizer(cfg.AuthorizeURL, token), Guard: guard, Audit: audit, Logger: logger}
 	return server, listener, nil
 }

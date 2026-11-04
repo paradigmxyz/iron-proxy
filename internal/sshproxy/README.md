@@ -2,7 +2,7 @@
 
 SSH runs as an optional listener inside the main `iron-proxy` process. Build and
 test it with the normal repository commands; no separate executable or module
-is needed. The module uses sshpiper's crypto replacement for transport support.
+is needed.
 
 Configure a top-level `ssh:` block in the regular YAML file, or set
 `IRON_SSH_CONFIG_JSON` to the equivalent JSON object for managed deployments.
@@ -13,9 +13,9 @@ The SSH configuration contains `listen`, `host_key` (an existing Iron
 secret source), `client_public_key` (registered by the trusted control plane),
 `authorize_url`, and `token_env`. The environment variable named by `token_env`
 is a proxy-only bearer token. Configuration and host keys must never be mounted
-in the sandbox. `upstream_deny_cidrs` uses Iron's existing dial-time IP guard;
-omission blocks loopback and cloud metadata. Explicit overrides are intended
-for trusted operator configuration, including loopback-only integration tests.
+in the sandbox. Upstream dials honor the proxy-wide `proxy.upstream_deny_cidrs`.
+Connections, authorization decisions, and session requests emit the standard
+audit entries (JSON and OTEL) with `mode: ssh`.
 
 The authorizer receives `{route, public_key}` and an optional `destination` for
 per-call targets. A client names these using SSH username
@@ -30,10 +30,10 @@ the proxy token and return a grant containing `id`, `principal`, `generation`,
 unauthorized routes. Responses are limited to 1 MiB; errors never expose their
 bodies or credential values. Redirects are not followed.
 
-The paired public key is checked before authorization or any upstream dial.
-Exec and SFTP channels are supported; forwarding is blocked. Global requests
-are refused locally, and no-reply environment/end-of-write requests are discarded.
-Other unsupported channel capabilities terminate the connection. Grants normally require a pinned SSH host key and verified WSS TLS.
+The client must prove possession of the paired key before authorization or
+any upstream dial. Exec and SFTP channels are supported; forwarding is blocked.
+Global requests are refused locally, and environment/end-of-write requests are
+discarded. Other channel types and requests are refused. Grants normally require a pinned SSH host key and verified WSS TLS.
 An authorizer may explicitly return `tls_identity: true` with an empty
 `host_key` for deployment-allowed WSS gateways. This authenticates the exact
 destination using the TLS certificate and hostname, allowing the SSH key inside

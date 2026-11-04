@@ -81,22 +81,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	sshServer, sshListener, err := sshproxy.LoadFromNode(ctx, cfg.SSH, logger)
-	if err == nil && *requireSSH && sshServer == nil {
-		err = fmt.Errorf("SSH configuration required")
-	}
-	if err != nil {
-		logger.Error("initializing SSH listener", slog.String("error", err.Error()))
-		os.Exit(1)
-	}
-	if sshListener != nil {
-		defer func() {
-			if err := sshListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
-				logger.Error("closing SSH listener", slog.String("error", err.Error()))
-			}
-		}()
-	}
-
 	// CLI flag takes precedence over environment variable.
 	proxyToken := *tokenFlag
 	if proxyToken == "" {
@@ -230,6 +214,22 @@ func main() {
 		logger.Info("upstream deny list active",
 			slog.Any("cidrs", cfg.Proxy.UpstreamDenyCIDRs.Values),
 		)
+	}
+
+	sshServer, sshListener, err := sshproxy.LoadFromNode(ctx, cfg.SSH, guard, auditFunc, logger)
+	if err == nil && *requireSSH && sshServer == nil {
+		err = fmt.Errorf("SSH configuration required")
+	}
+	if err != nil {
+		logger.Error("initializing SSH listener", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	if sshListener != nil {
+		defer func() {
+			if err := sshListener.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+				logger.Error("closing SSH listener", slog.String("error", err.Error()))
+			}
+		}()
 	}
 
 	responseRetryHandler, responseRetryStatuses, err := responseRetryHandlerFromEnv(

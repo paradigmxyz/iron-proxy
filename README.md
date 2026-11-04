@@ -1107,6 +1107,6 @@ shasum -a 256 iron-proxy-linux-amd64 | grep -F "$(grep -F 'iron-proxy-linux-amd6
 ### SSH credential proxy (local development)
 
 The opt-in [SSH listener](internal/sshproxy/README.md) maps a sandbox's disposable identity
-onto a separately held upstream key using sshpiper. It supports non-interactive
+onto a separately held upstream key. It supports non-interactive
 exec, SFTP, and wstunnel v11 WSS endpoints, with pinned SSH host identities and
 renewable authorization leases. HTTP and SSH share one executable and process.

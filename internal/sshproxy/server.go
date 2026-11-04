@@ -6,6 +6,8 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -14,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ironsh/iron-proxy/internal/dnsguard"
+	"github.com/ironsh/iron-proxy/internal/transform"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v3"
 )
@@ -23,15 +27,25 @@ type Server struct {
 	HostKey          ssh.Signer
 	ClientPublicKey  ssh.PublicKey
 	Authorize        Authorizer
-	DenyCIDRs        []string
+	Guard            *dnsguard.Guard
+	Audit            transform.AuditFunc
 	TLSRootCAs       *x509.CertPool
 	Logger           *slog.Logger
 	RenewalInterval  time.Duration
 	HandshakeTimeout time.Duration
 }
 
+// session is one authorized upstream connection.
+type session struct {
+	auth  Authorization
+	grant *Grant
+	conn  ssh.Conn
+	chans <-chan ssh.NewChannel
+	reqs  <-chan *ssh.Request
+}
+
 func (s *Server) Serve(parent context.Context, listener net.Listener) error {
-	if s.HostKey == nil || s.ClientPublicKey == nil || s.Authorize == nil || s.Logger == nil {
+	if s.HostKey == nil || s.ClientPublicKey == nil || s.Authorize == nil || s.Guard == nil || s.Audit == nil || s.Logger == nil {
 		return errors.New("incomplete SSH configuration")
 	}
 	ctx, cancel := context.WithCancel(parent)
@@ -60,18 +74,7 @@ func (s *Server) handle(parent context.Context, conn net.Conn) {
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stop()
 	started := time.Now()
-	action, reason := "deny", "authentication_failed"
-	var route, principal, grantID string
-	defer func() {
-		rejected := ""
-		if action == "deny" {
-			rejected = "ssh_authorization"
-			if reason == "capability_denied" {
-				rejected = "ssh_policy"
-			}
-		}
-		s.Logger.Info("ssh_connection", "action", action, "reason", reason, "route", route, "principal", principal, "grant_id", grantID, "duration_ms", time.Since(started).Milliseconds(), "request_transforms", []string{"ssh_authorization"}, "rejected_by", rejected)
-	}()
+	remote := conn.RemoteAddr().String()
 	timeout := s.HandshakeTimeout
 	if timeout == 0 {
 		timeout = 15 * time.Second
@@ -82,68 +85,174 @@ func (s *Server) handle(parent context.Context, conn net.Conn) {
 	if conn.SetDeadline(handshakeDeadline) != nil {
 		return
 	}
-	var approved *Grant
-	var auth Authorization
-	var upstream net.Conn
+	var sess *session
 	defer func() {
-		if upstream != nil {
-			_ = upstream.Close()
+		if sess != nil {
+			_ = sess.conn.Close()
 		}
 	}()
-	config := &ssh.PiperConfig{MaxAuthTries: 1}
-	config.PublicKeyCallback = func(meta ssh.ConnMetadata, key ssh.PublicKey, _ ssh.ChallengeContext) (*ssh.Upstream, error) {
-		if !bytes.Equal(key.Marshal(), s.ClientPublicKey.Marshal()) {
-			return nil, errors.New("SSH access denied")
-		}
-		parsedRoute, destination, err := parseRoute(meta.User())
-		if err != nil {
-			return nil, err
-		}
-		route = parsedRoute
-		auth = Authorization{Route: route, Destination: destination, PublicKey: string(bytes.TrimSpace(ssh.MarshalAuthorizedKey(key)))}
-		grant, err := s.Authorize(handshakeCtx, auth)
-		if err != nil {
-			return nil, errors.New("SSH access denied")
-		}
-		if err = validateGrant(grant); err != nil {
-			return nil, err
-		}
-		credential, err := signer(handshakeCtx, grant.PrivateKey, s.Logger)
-		if err != nil {
-			return nil, err
-		}
-		var expected ssh.PublicKey
-		if !grant.TLSIdentity {
-			expected, _, _, _, err = ssh.ParseAuthorizedKey([]byte(grant.HostKey))
+	attempted := false
+	config := &ssh.ServerConfig{
+		// Also runs for unsigned key queries, so it must only compare keys.
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if !bytes.Equal(key.Marshal(), s.ClientPublicKey.Marshal()) {
+				return nil, errAccessDenied
+			}
+			return nil, nil
+		},
+		// Runs only after the client proves possession of the paired key.
+		VerifiedPublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey, _ *ssh.Permissions, _ string) (*ssh.Permissions, error) {
+			attempted = true
+			attemptStarted := time.Now()
+			next, err := s.connect(handshakeCtx, meta.User(), key, handshakeDeadline)
+			s.audit(attemptStarted, remote, next, "auth", next.auth.Route, "ssh_authorization", err)
 			if err != nil {
-				return nil, errors.New("invalid upstream host identity")
+				return nil, err
 			}
+			sess = next
+			return nil, nil
+		},
+	}
+	config.AddHostKey(s.HostKey)
+	downstream, chans, reqs, err := ssh.NewServerConn(conn, config)
+	if err != nil {
+		if !attempted {
+			s.audit(started, remote, nil, "auth", "", "ssh_authorization", fmt.Errorf("%w: %v", errAccessDenied, err))
 		}
-		if upstream != nil {
-			_ = upstream.Close()
+		return
+	}
+	defer downstream.Close()
+	if conn.SetDeadline(time.Time{}) != nil {
+		return
+	}
+	handshakeCancel()
+	stopUpstream := context.AfterFunc(ctx, func() { _ = sess.conn.Close() })
+	defer stopUpstream()
+
+	var wg sync.WaitGroup
+	run := func(f func()) {
+		wg.Add(1)
+		go func() { defer wg.Done(); f() }()
+	}
+	// Wait's error only says why upstream closed; either way the session ends.
+	run(func() { _ = sess.conn.Wait(); cancel() })
+	run(func() { s.renew(ctx, cancel, sess.auth, sess.grant) })
+	// Global requests (forwarding, keepalives) are refused in both directions.
+	run(func() { ssh.DiscardRequests(reqs) })
+	run(func() { ssh.DiscardRequests(sess.reqs) })
+	run(func() {
+		for nc := range sess.chans {
+			_ = nc.Reject(ssh.Prohibited, "upstream channels are not permitted") // peer is being refused; a failed send changes nothing
 		}
-		connected, err := transport(handshakeCtx, grant.Destination, s.DenyCIDRs, s.TLSRootCAs)
+	})
+	for nc := range chans {
+		if nc.ChannelType() != "session" {
+			s.audit(time.Now(), remote, sess, nc.ChannelType(), "", "ssh_policy", errCapabilityDenied)
+			_ = nc.Reject(ssh.Prohibited, "only session channels are permitted") // as above
+			continue
+		}
+		run(func() { s.bridge(nc, sess, remote) })
+	}
+	cancel()
+	_ = sess.conn.Close()
+	wg.Wait()
+}
+
+// bridge pairs one downstream session channel with a new upstream one.
+func (s *Server) bridge(nc ssh.NewChannel, sess *session, remote string) {
+	up, upReqs, err := sess.conn.OpenChannel("session", nc.ExtraData())
+	if err != nil {
+		_ = nc.Reject(ssh.ConnectionFailed, "upstream session unavailable") // refusal is best effort
+		return
+	}
+	down, downReqs, err := nc.Accept()
+	if err != nil {
+		_ = up.Close()
+		return
+	}
+	// Upstream output, including exit-status requests, must be delivered
+	// before the downstream channel closes.
+	var output sync.WaitGroup
+	output.Add(3)
+	go func() { defer output.Done(); _, _ = io.Copy(down, up) }()
+	go func() { defer output.Done(); _, _ = io.Copy(down.Stderr(), up.Stderr()) }()
+	go func() {
+		defer output.Done()
+		for req := range upReqs {
+			ok, _ := down.SendRequest(req.Type, req.WantReply, req.Payload) // a send failure means the client is gone; report false
+			_ = req.Reply(ok, nil)                                          // upstream channel may already be closed
+		}
+	}()
+	closed := make(chan struct{})
+	go func() { defer close(closed); output.Wait(); _ = down.Close() }()
+	input := make(chan struct{})
+	go func() { defer close(input); _, _ = io.Copy(up, down); _ = up.CloseWrite() }()
+
+	for req := range downReqs {
+		started := time.Now()
+		decision, detail := sessionRequestPolicy(req.Type, req.Payload)
+		if decision != forwardRequest {
+			if decision == refuseRequest {
+				s.audit(started, remote, sess, req.Type, detail, "ssh_policy", errCapabilityDenied)
+			}
+			_ = req.Reply(false, nil) // client may already be gone
+			continue
+		}
+		ok, err := up.SendRequest(req.Type, req.WantReply, req.Payload)
+		s.audit(started, remote, sess, req.Type, detail, "ssh_policy", err)
+		_ = req.Reply(ok, nil) // client may already be gone
+	}
+	_ = up.Close()
+	<-closed
+	<-input
+}
+
+// connect authorizes the route and logs in upstream with the granted key.
+// The returned session is never nil so failures can still be audited.
+func (s *Server) connect(ctx context.Context, user string, key ssh.PublicKey, deadline time.Time) (*session, error) {
+	sess := &session{}
+	route, destination, err := parseRoute(user)
+	if err != nil {
+		return sess, fmt.Errorf("%w: %v", errAccessDenied, err)
+	}
+	sess.auth = Authorization{Route: route, Destination: destination, PublicKey: string(bytes.TrimSpace(ssh.MarshalAuthorizedKey(key)))}
+	grant, err := s.Authorize(ctx, sess.auth)
+	if err != nil {
+		return sess, err
+	}
+	if err = validateGrant(grant); err != nil {
+		return sess, err
+	}
+	sess.grant = grant
+	credential, err := signer(ctx, grant.PrivateKey, s.Logger)
+	if err != nil {
+		return sess, err
+	}
+	var expected ssh.PublicKey
+	var algorithms []string
+	if !grant.TLSIdentity {
+		expected, _, _, _, err = ssh.ParseAuthorizedKey([]byte(grant.HostKey))
 		if err != nil {
-			return nil, errors.New("SSH upstream unavailable")
+			return sess, errors.New("invalid upstream host identity")
 		}
-		upstream = connected
-		// Capture this connection, not the mutable upstream variable. Revocation
-		// must interrupt blocked writes as well as downstream reads.
-		context.AfterFunc(ctx, func() { _ = connected.Close() })
-		if err = upstream.SetDeadline(handshakeDeadline); err != nil {
-			return nil, err
+		algorithms = []string{expected.Type()}
+		if expected.Type() == ssh.KeyAlgoRSA {
+			algorithms = []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}
 		}
-		var algorithms []string
-		if expected != nil {
-			algorithms = []string{expected.Type()}
-			if expected.Type() == ssh.KeyAlgoRSA {
-				algorithms = []string{ssh.KeyAlgoRSASHA512, ssh.KeyAlgoRSASHA256}
-			}
-		}
-		approved = grant
-		principal = grant.Principal
-		grantID = grant.ID
-		return &ssh.Upstream{Conn: upstream, Address: grant.Destination, ClientConfig: ssh.ClientConfig{User: grant.Username, HostKeyAlgorithms: algorithms, Auth: []ssh.AuthMethod{ssh.PublicKeys(credential)}, HostKeyCallback: func(_ string, _ net.Addr, actual ssh.PublicKey) error {
+	}
+	netConn, err := transport(ctx, grant.Destination, s.Guard, s.TLSRootCAs)
+	if err != nil {
+		return sess, fmt.Errorf("SSH upstream unavailable: %w", err)
+	}
+	if err = netConn.SetDeadline(deadline); err != nil {
+		_ = netConn.Close()
+		return sess, err
+	}
+	config := &ssh.ClientConfig{
+		User:              grant.Username,
+		Auth:              []ssh.AuthMethod{ssh.PublicKeys(credential)},
+		HostKeyAlgorithms: algorithms,
+		HostKeyCallback: func(_ string, _ net.Addr, actual ssh.PublicKey) error {
 			// TLS-identity grants are WSS-only (validated before dialing). The
 			// transport authenticates the exact URL's server certificate with no
 			// redirects or insecure TLS option; SSH remains inside that tunnel.
@@ -151,34 +260,53 @@ func (s *Server) handle(parent context.Context, conn net.Conn) {
 				return errors.New("SSH host identity mismatch")
 			}
 			return nil
-		}}}, nil
+		},
 	}
-	config.AddHostKey(s.HostKey)
-	pipe, err := ssh.NewSSHPiperConn(conn, config)
+	conn, chans, reqs, err := ssh.NewClientConn(netConn, grant.Destination, config)
 	if err != nil {
-		return
+		_ = netConn.Close()
+		return sess, fmt.Errorf("SSH upstream login failed: %w", err)
 	}
-	defer pipe.Close()
-	if approved == nil {
-		return
+	if err = netConn.SetDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return sess, err
 	}
-	if conn.SetDeadline(time.Time{}) != nil || upstream.SetDeadline(time.Time{}) != nil {
-		return
+	sess.conn, sess.chans, sess.reqs = conn, chans, reqs
+	return sess, nil
+}
+
+// audit emits one SSH event through the proxy's shared audit sinks.
+func (s *Server) audit(started time.Time, remote string, sess *session, method, path, name string, err error) {
+	trace := transform.TransformTrace{Name: name, Duration: time.Since(started), Annotations: map[string]any{}}
+	result := &transform.PipelineResult{
+		Method:     method,
+		Path:       path,
+		RemoteAddr: remote,
+		Mode:       transform.ModeSSH,
+		StartedAt:  started,
+		Duration:   time.Since(started),
 	}
-	handshakeCancel()
-	action, reason = "allow", "connection_closed"
-	leaseCtx, leaseCancel := context.WithCancel(ctx)
-	defer leaseCancel()
-	done := make(chan struct{})
-	go func() { defer close(done); s.renew(leaseCtx, cancel, auth, approved) }()
-	if err := pipe.WaitWithHook(upstreamPolicy, downstreamPolicy); err != nil {
-		reason = "connection_terminated"
-		if errors.Is(err, errCapabilityDenied) {
-			action, reason = "deny", "capability_denied"
+	if sess != nil {
+		if sess.auth.Route != "" {
+			trace.Annotations["route"] = sess.auth.Route
+		}
+		if g := sess.grant; g != nil {
+			trace.Annotations["principal"] = g.Principal
+			trace.Annotations["grant_id"] = g.ID
+			if u, err := url.Parse(g.Destination); err == nil {
+				result.Host = u.Host
+			}
 		}
 	}
-	leaseCancel()
-	<-done
+	switch {
+	case errors.Is(err, errAccessDenied) || errors.Is(err, errCapabilityDenied):
+		result.Action, trace.Action = transform.ActionReject, transform.ActionReject
+		trace.Annotations["reason"] = err.Error()
+	case err != nil:
+		result.Err, trace.Err = err, err
+	}
+	result.RequestTransforms = []transform.TransformTrace{trace}
+	s.Audit(result)
 }
 
 func validateGrant(g *Grant) error {
@@ -231,6 +359,9 @@ func (s *Server) renew(ctx context.Context, cancel context.CancelFunc, a Authori
 		case <-ticker.C:
 			next, err := s.Authorize(ctx, a)
 			if err != nil || validateGrant(next) != nil || !sameGrant(g, next) {
+				if ctx.Err() == nil {
+					s.Logger.Warn("SSH lease revoked", slog.String("grant_id", g.ID), slog.String("principal", g.Principal))
+				}
 				cancel()
 				return
 			}
