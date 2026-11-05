@@ -669,6 +669,33 @@ func TestSecrets_RequireRejectsNoHeaders(t *testing.T) {
 	require.Equal(t, transform.ActionReject, res.Action)
 }
 
+func TestSecrets_RequireAllowsConnectWithoutHeaderWhenConfigured(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.Require = true
+		e.AllowConnectWithoutHeader = true
+	})})
+
+	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
+	req.Host = "api.openai.com:443"
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+}
+
+func TestSecrets_RequireRejectsConnectWithoutHeaderByDefault(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.Require = true
+	})})
+
+	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
+	req.Host = "api.openai.com:443"
+
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
 func TestSecrets_RequireWithBodySwap(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
 		e.MatchHeaders = nil
@@ -1504,4 +1531,3 @@ func TestLazy_FailureCachedAcrossRequests(t *testing.T) {
 	defer fr.mu.Unlock()
 	require.Equal(t, 1, fr.fetchCalls["MISSING"])
 }
-

@@ -39,19 +39,21 @@ type secretEntry struct {
 
 	// Deprecated top-level fields for backwards compatibility.
 	// Users should migrate to the replace block.
-	ProxyValue   string   `yaml:"proxy_value,omitempty"`
-	MatchHeaders []string `yaml:"match_headers,omitempty"`
-	MatchBody    bool     `yaml:"match_body,omitempty"`
-	Require      bool     `yaml:"require,omitempty"`
+	ProxyValue                string   `yaml:"proxy_value,omitempty"`
+	MatchHeaders              []string `yaml:"match_headers,omitempty"`
+	MatchBody                 bool     `yaml:"match_body,omitempty"`
+	Require                   bool     `yaml:"require,omitempty"`
+	AllowConnectWithoutHeader bool     `yaml:"allow_connect_without_header,omitempty"`
 }
 
 type replaceConfig struct {
-	ProxyValue   string   `yaml:"proxy_value"`
-	MatchHeaders []string `yaml:"match_headers,omitempty"`
-	MatchBody    bool     `yaml:"match_body,omitempty"`
-	MatchPath    bool     `yaml:"match_path,omitempty"`
-	MatchQuery   bool     `yaml:"match_query,omitempty"`
-	Require      bool     `yaml:"require,omitempty"`
+	ProxyValue                string   `yaml:"proxy_value"`
+	MatchHeaders              []string `yaml:"match_headers,omitempty"`
+	MatchBody                 bool     `yaml:"match_body,omitempty"`
+	MatchPath                 bool     `yaml:"match_path,omitempty"`
+	MatchQuery                bool     `yaml:"match_query,omitempty"`
+	Require                   bool     `yaml:"require,omitempty"`
+	AllowConnectWithoutHeader bool     `yaml:"allow_connect_without_header,omitempty"`
 }
 
 type injectConfig struct {
@@ -70,12 +72,13 @@ type resolvedSecret struct {
 	rules  []hostmatch.Rule
 
 	// replace mode fields
-	proxyValue   string
-	matchHeaders []headerMatcher // empty = all headers
-	matchBody    bool
-	matchPath    bool
-	matchQuery   bool
-	require      bool
+	proxyValue                string
+	matchHeaders              []headerMatcher // empty = all headers
+	matchBody                 bool
+	matchPath                 bool
+	matchQuery                bool
+	require                   bool
+	allowConnectWithoutHeader bool
 
 	// inject mode fields
 	injectHeader     string
@@ -241,15 +244,16 @@ func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets,
 				return nil, err
 			}
 			resolved = append(resolved, resolvedSecret{
-				source:       source,
-				mode:         "replace",
-				proxyValue:   replace.ProxyValue,
-				matchHeaders: matchers,
-				matchBody:    replace.MatchBody,
-				matchPath:    replace.MatchPath,
-				matchQuery:   replace.MatchQuery,
-				require:      replace.Require,
-				rules:        rules,
+				source:                    source,
+				mode:                      "replace",
+				proxyValue:                replace.ProxyValue,
+				matchHeaders:              matchers,
+				matchBody:                 replace.MatchBody,
+				matchPath:                 replace.MatchPath,
+				matchQuery:                replace.MatchQuery,
+				require:                   replace.Require,
+				allowConnectWithoutHeader: replace.AllowConnectWithoutHeader,
+				rules:                     rules,
 			})
 		}
 	}
@@ -308,10 +312,11 @@ func normalizeEntry(i int, entry *secretEntry) (*replaceConfig, *injectConfig, e
 		return nil, nil, fmt.Errorf("secrets[%d]: proxy_value is required", i)
 	}
 	return &replaceConfig{
-		ProxyValue:   entry.ProxyValue,
-		MatchHeaders: entry.MatchHeaders,
-		MatchBody:    entry.MatchBody,
-		Require:      entry.Require,
+		ProxyValue:                entry.ProxyValue,
+		MatchHeaders:              entry.MatchHeaders,
+		MatchBody:                 entry.MatchBody,
+		Require:                   entry.Require,
+		AllowConnectWithoutHeader: entry.AllowConnectWithoutHeader,
 	}, nil, nil
 }
 
@@ -387,7 +392,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 
 		if len(locations) > 0 {
 			swapped = append(swapped, secretRecord{Secret: name, Locations: locations})
-		} else if sec.require {
+		} else if sec.require && !allowConnectWithoutHeader(req, &sec) {
 			tctx.Annotate("rejected", name)
 			return &transform.TransformResult{Action: transform.ActionReject}, nil
 		}
@@ -404,6 +409,26 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+func allowConnectWithoutHeader(req *http.Request, sec *resolvedSecret) bool {
+	if !sec.allowConnectWithoutHeader || req.Method != http.MethodConnect || len(sec.matchHeaders) == 0 {
+		return false
+	}
+	for _, matcher := range sec.matchHeaders {
+		if matcher.re != nil {
+			for headerName := range req.Header {
+				if matcher.re.MatchString(http.CanonicalHeaderKey(headerName)) {
+					return false
+				}
+			}
+			continue
+		}
+		if len(req.Header.Values(matcher.name)) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Secrets) injectSecret(req *http.Request, sec *resolvedSecret, realValue string) ([]string, error) {
