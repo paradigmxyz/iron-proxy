@@ -681,6 +681,12 @@ func TestSecrets_RequireAllowsConnectWithoutHeaderWhenConfigured(t *testing.T) {
 	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionContinue, res.Action)
+
+	// The opt-in covers tunnels only: a plain request without the header is still rejected.
+	req = httptest.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
+	res, err = s.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
 }
 
 func TestSecrets_RequireRejectsConnectWithoutHeaderByDefault(t *testing.T) {
