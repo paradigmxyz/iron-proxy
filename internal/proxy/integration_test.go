@@ -952,6 +952,41 @@ func trailerUpstream(t *testing.T) *httptest.Server {
 	return s
 }
 
+// TestIntegration_DirectHTTPS_HTTP1Trailers verifies an HTTP/1.1 client gets the
+// upstream's trailers too, which needs a chunked body rather than a fixed length.
+func TestIntegration_DirectHTTPS_HTTP1Trailers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	upstream := trailerUpstream(t)
+	defer upstream.Close()
+
+	const fakeHost = "direct-h1.example.com"
+	_, httpsAddr, caPool := startDirectHTTPSProxy(t, []string{fakeHost}, upstream.Listener.Addr().String(), logger)
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: caPool, ServerName: fakeHost, NextProtos: []string{"http/1.1"}},
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "tcp", httpsAddr)
+			},
+		},
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.Get("https://" + fakeHost + "/test")
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	require.Equal(t, 1, resp.ProtoMajor, "client must speak HTTP/1.1 to the proxy")
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, "trailer body", string(body))
+	require.Equal(t, "trailer-value", resp.Trailer.Get("X-Test-Trailer"))
+}
+
 // TestIntegration_DirectHTTPS_HTTP2 verifies the direct HTTPS MITM listener
 // (not the CONNECT tunnel) negotiates h2 and forwards response trailers.
 func TestIntegration_DirectHTTPS_HTTP2(t *testing.T) {

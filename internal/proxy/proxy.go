@@ -871,14 +871,22 @@ func (p *Proxy) streamSSE(w http.ResponseWriter, resp *http.Response) {
 
 func (p *Proxy) writeResponse(w http.ResponseWriter, resp *http.Response) {
 	copyHeaders(w.Header(), resp.Header)
-	// Forward upstream trailers (e.g. gRPC status) after the body.
+	// Forward upstream trailers (e.g. gRPC status) after the body. HTTP/1.1
+	// sends trailers only on a chunked body, so a response that has them drops
+	// any fixed length and declares their names before the header is written.
+	if len(resp.Trailer) > 0 {
+		w.Header().Del("Content-Length")
+	}
+	for name := range resp.Trailer {
+		w.Header().Add("Trailer", name)
+	}
 	defer writeTrailers(w, resp)
 	if buf, ok := resp.Body.(*transform.BufferedBody); ok {
 		// If a transform buffered the response body, set Content-Length
 		// from the buffered data. Otherwise preserve the upstream header
 		// as-is so clients that require Content-Length (e.g. Docker)
-		// work correctly.
-		if n := buf.Len(); n >= 0 {
+		// work correctly. A response with trailers stays chunked.
+		if n := buf.Len(); n >= 0 && len(resp.Trailer) == 0 {
 			w.Header().Set("Content-Length", strconv.FormatInt(int64(n), 10))
 		}
 		w.WriteHeader(resp.StatusCode)
