@@ -447,7 +447,7 @@ The sandbox never holds real credentials. Instead:
 
 1. Configure iron-proxy with the real secret source: environment variables, a
    file on disk, AWS Secrets Manager, AWS Systems Manager Parameter Store,
-   Vault KV, 1Password (service account), or 1Password Connect.
+   Vault KV, 1Password (service account), 1Password Connect, or Turnkey Managed Secrets.
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
 3. Configure the `secrets` transform to map proxy tokens to those sources.
 
@@ -509,6 +509,31 @@ Secret sources:
 Every source also accepts an optional `json_key`. When set, the resolved value
 is parsed as a JSON object and the single top-level string field at that key is
 extracted. Use it to pull one field out of a JSON secret.
+
+**Turnkey Managed Secrets:** use `type: turnkey` with `organization_id` and
+`secret_id`. The proxy reads its API private key from `TURNKEY_API_PRIVATE_KEY`,
+or the environment variable named by `api_private_key_env`. Give that API identity
+a policy scoped to exporting the intended secret. The SDK verifies the Signer
+signature and organization and decrypts an export encrypted to a fresh recipient
+key generated in the proxy. Optional `ttl`, `failure_ttl`, and `json_key` use the
+same cache and extraction behavior as other sources.
+
+```yaml
+source:
+  type: turnkey
+  organization_id: "<organization-id>"
+  secret_id: "<secret-id>"
+  api_private_key_env: TURNKEY_API_PRIVATE_KEY
+  ttl: 1m
+  failure_ttl: 2s
+```
+
+Keep the API private key in the trusted proxy process, outside the workload.
+Configure `require: true` on the inject or replace block to reject requests when
+the secret is unavailable. A pending human approval is currently treated as an
+unavailable secret; this source does not implement an approval UI or resume flow.
+Cached credentials can be reused until their TTL expires, so export approval is
+not approval of each HTTP request.
 
 `ttl` controls how long a successfully fetched value is cached before refresh
 (empty caches forever). `failure_ttl` controls how long a fetch error is
