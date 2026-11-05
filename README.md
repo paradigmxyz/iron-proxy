@@ -720,7 +720,9 @@ All protocols go through the same transform pipeline as regular HTTP/HTTPS
 requests. Absolute-form HTTP requests are handled by the normal HTTP proxy
 path. For CONNECT and SOCKS5, the proxy evaluates a synthetic CONNECT request
 against your allowlist and secrets transforms, so tunnel connections are
-subject to the same default-deny policy.
+subject to the same default-deny policy. The allowlist checks this synthetic
+CONNECT against hosts and CIDRs only. Method and path restrictions of a rule
+apply to the requests inside the tunnel.
 
 After the CONNECT or SOCKS5 handshake, the proxy peeks at the first byte to
 detect the inner protocol:
