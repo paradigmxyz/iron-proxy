@@ -69,15 +69,18 @@ func TestTurnkeyBuilderLazyExport(t *testing.T) {
 }
 
 func TestTurnkeyBuilderValidationDoesNotFetch(t *testing.T) {
-	cases := []map[string]any{
-		{"secret_id": "test-secret"},
-		{"organization_id": "test-org"},
-		{"organization_id": []string{"invalid"}, "secret_id": "test-secret"},
-		{"organization_id": "test-org", "secret_id": "test-secret", "ttl": "invalid"},
-		{"organization_id": "test-org", "secret_id": "test-secret", "failure_ttl": "invalid"},
+	cases := []struct {
+		name string
+		cfg  map[string]any
+	}{
+		{name: "missing organization", cfg: map[string]any{"secret_id": "test-secret"}},
+		{name: "missing secret", cfg: map[string]any{"organization_id": "test-org"}},
+		{name: "invalid organization type", cfg: map[string]any{"organization_id": []string{"invalid"}, "secret_id": "test-secret"}},
+		{name: "invalid ttl", cfg: map[string]any{"organization_id": "test-org", "secret_id": "test-secret", "ttl": "invalid"}},
+		{name: "invalid failure ttl", cfg: map[string]any{"organization_id": "test-org", "secret_id": "test-secret", "failure_ttl": "invalid"}},
 	}
-	for _, cfg := range cases {
-		t.Run("invalid_config", func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			builder := &turnkeyBuilder{
 				logger: slog.Default(),
 				clientFor: func(string, string) (turnkeyClient, error) {
@@ -85,7 +88,7 @@ func TestTurnkeyBuilderValidationDoesNotFetch(t *testing.T) {
 					return nil, nil
 				},
 			}
-			_, err := builder.Build(yamlNode(t, cfg))
+			_, err := builder.Build(yamlNode(t, tc.cfg))
 			require.Error(t, err)
 		})
 	}

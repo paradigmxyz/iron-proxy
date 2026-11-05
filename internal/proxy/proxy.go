@@ -26,7 +26,6 @@ import (
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/transform"
-	"golang.org/x/net/http2"
 )
 
 // Proxy is the HTTP/HTTPS proxy server. When Mode is TLSModeMITM, the HTTPS
@@ -134,15 +133,16 @@ func New(opts Options) *Proxy {
 	}
 
 	p.httpsServer = &http.Server{
-		Addr:    opts.HTTPSAddr,
-		Handler: http.HandlerFunc(p.handleDirectHTTP),
+		Addr:      opts.HTTPSAddr,
+		Handler:   http.HandlerFunc(p.handleDirectHTTP),
+		Protocols: new(http.Protocols),
 		TLSConfig: &tls.Config{
 			GetCertificate: p.getCertificate,
+			NextProtos:     []string{"h2", "http/1.1"},
 		},
 	}
-	// Enable HTTP/2 on the HTTPS listener (adds h2 to the TLS ALPN and serves
-	// negotiated conns through the existing handler); zero config never errors.
-	_ = http2.ConfigureServer(p.httpsServer, &http2.Server{})
+	p.httpsServer.Protocols.SetHTTP1(true)
+	p.httpsServer.Protocols.SetHTTP2(true)
 
 	return p
 }
