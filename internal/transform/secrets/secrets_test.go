@@ -669,6 +669,37 @@ func TestSecrets_RequireRejectsNoHeaders(t *testing.T) {
 	require.Equal(t, transform.ActionReject, res.Action)
 }
 
+func TestSecrets_RequirePassesMITMTunnelConnect(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.Require = true
+	})})
+	tctx := &transform.TransformContext{Mode: transform.ModeMITM}
+
+	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
+	req.Host = "api.openai.com:443"
+	res, err := s.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionContinue, res.Action)
+
+	// The requests inside the tunnel still need the proxy token.
+	req = httptest.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
+	res, err = s.TransformRequest(context.Background(), tctx, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
+func TestSecrets_RequireRejectsSNIOnlyTunnelConnect(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.Require = true
+	})})
+
+	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
+	req.Host = "api.openai.com:443"
+	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{Mode: transform.ModeSNIOnly}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
+}
+
 func TestSecrets_RequireWithBodySwap(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
 		e.MatchHeaders = nil
@@ -1504,4 +1535,3 @@ func TestLazy_FailureCachedAcrossRequests(t *testing.T) {
 	defer fr.mu.Unlock()
 	require.Equal(t, 1, fr.fetchCalls["MISSING"])
 }
-

@@ -337,6 +337,10 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 	var swapped, injected []secretRecord
 	var unavailable []string
+	// A tunnel's synthetic CONNECT never carries the proxy token. In MITM mode every
+	// request inside the tunnel passes through here again and must carry it, so the
+	// CONNECT itself may pass. An SNI-only tunnel is never inspected; it stays rejected.
+	mitmConnect := req.Method == http.MethodConnect && tctx.Mode == transform.ModeMITM
 
 	for _, sec := range s.secrets {
 		if !hostmatch.MatchAnyRule(sec.rules, req) {
@@ -387,7 +391,7 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 
 		if len(locations) > 0 {
 			swapped = append(swapped, secretRecord{Secret: name, Locations: locations})
-		} else if sec.require {
+		} else if sec.require && !mitmConnect {
 			tctx.Annotate("rejected", name)
 			return &transform.TransformResult{Action: transform.ActionReject}, nil
 		}
