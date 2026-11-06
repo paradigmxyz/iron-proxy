@@ -603,27 +603,6 @@ go test -race ./internal/transform/secrets -run '^TestTurnkeySourceSDKExportThro
 This uses signed synthetic exports from a local server and a test-only Signer key.
 Production source configuration cannot override the API endpoint or Signer key.
 
-#### Agent proxy smoke test
-
-For a credential-free agent-style smoke test, run:
-
-```sh
-go test -race ./internal/proxy -run '^TestTunnel_AgentSecretBoundary$' -v
-```
-
-This starts ephemeral local proxy and mock OpenAI-compatible provider listeners.
-An agent-style client sends a placeholder in `Authorization`; the proxy replaces
-it with a synthetic credential. The test also checks required-token and host
-rejections. It uses the environment source to simulate a successful secret fetch;
-it does not exercise live Turnkey export or run Hermes itself.
-
-For an agent such as Hermes, keep the Turnkey API key in the proxy process and
-give the agent only the configured `proxy_value`. Route the agent's HTTP client
-through the explicit proxy listener (including HTTPS CONNECT and a trusted proxy
-CA for HTTPS), and allowlist only the intended provider. Verify that the agent's
-HTTP library actually uses that proxy; environment variables alone do not enforce
-egress isolation. The agent must not inherit the proxy's credential environment.
-
 ### Judge
 
 The judge transform calls an LLM to produce an allow/deny decision for
