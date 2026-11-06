@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"io"
+	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -78,13 +80,35 @@ func newTurnkeyClient(organizationID, apiKeyEnv string) (turnkeyClient, error) {
 	}
 	client, err := turnkey.NewClient(stamper, organizationID,
 		turnkey.WithHTTPClient(&http.Client{
-			Timeout:       25 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Timeout:   25 * time.Second,
+			Transport: turnkeyTransport{inner: http.DefaultTransport},
 		}),
 		turnkey.WithHTTPRetries(0),
+		// The SDK logs raw transport errors before we can sanitize them.
+		turnkey.WithLogger(log.New(io.Discard, "", 0)),
 	)
 	if err != nil {
 		return nil, errors.New("cannot initialize turnkey API client")
 	}
 	return client, nil
+}
+
+// The pinned SDK reconstructs http.Client and drops CheckRedirect. Reject
+// redirects before net/http sees them, so no signed request can be replayed.
+type turnkeyTransport struct {
+	inner http.RoundTripper
+}
+
+func (t turnkeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if err := resp.Body.Close(); err != nil {
+			return nil, errors.New("cannot close turnkey redirect response")
+		}
+		return nil, errors.New("turnkey redirect rejected")
+	}
+	return resp, nil
 }

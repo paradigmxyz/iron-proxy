@@ -5,9 +5,15 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
+	"os"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	turnkey "github.com/tkhq/go-sdk/v2"
@@ -162,4 +168,95 @@ func TestTurnkeyFactoryRejectsRequiredUnavailableSecret(t *testing.T) {
 	result, err := tr.TransformRequest(context.Background(), &transform.TransformContext{}, req)
 	require.NoError(t, err)
 	require.Equal(t, transform.ActionReject, result.Action)
+}
+
+// Exercise the real SDK and net/http redirect machinery, not fakeTurnkeyClient.
+func TestTurnkeyClientRejectsRedirects(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			original := http.DefaultTransport
+			t.Cleanup(func() { http.DefaultTransport = original })
+			calls := 0
+			body := &trackedTurnkeyBody{Reader: strings.NewReader("redirect")}
+			http.DefaultTransport = turnkeyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if calls > 1 {
+					return nil, errors.New("redirect target reached")
+				}
+				require.Equal(t, "POST", req.Method)
+				require.NotEmpty(t, req.Header.Get("X-Stamp"))
+				return &http.Response{StatusCode: status, Header: http.Header{"Location": {"https://redirect.invalid/export"}}, Body: body, Request: req}, nil
+			})
+			t.Setenv("TEST_TURNKEY_KEY", strings.Repeat("0", 63)+"1")
+			client, err := newTurnkeyClient("test-org", "TEST_TURNKEY_KEY")
+			require.NoError(t, err)
+			_, err = client.ExportSecret(context.Background(), "test-org", "test-secret")
+			require.Error(t, err)
+			require.Equal(t, 1, calls, "signed requests must never reach a redirect target")
+			require.True(t, body.closed)
+		})
+	}
+}
+
+type turnkeyRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f turnkeyRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type trackedTurnkeyBody struct {
+	*strings.Reader
+	closed bool
+}
+
+func (b *trackedTurnkeyBody) Close() error { b.closed = true; return nil }
+
+func TestTurnkeyApprovalFailureAfterSuccessServesStale(t *testing.T) {
+	calls := 0
+	builder := &turnkeyBuilder{logger: slog.Default(), clientFor: func(string, string) (turnkeyClient, error) {
+		return fakeTurnkeyClient{export: func(context.Context, string, string) ([]byte, error) {
+			calls++
+			if calls == 1 {
+				return []byte("synthetic-cached-secret"), nil
+			}
+			return nil, &turnkey.ActivityRequiresApprovalError{ActivityID: "test-activity"}
+		}}, nil
+	}}
+	source, err := builder.Build(yamlNode(t, map[string]string{"organization_id": "test-org", "secret_id": "test-secret", "ttl": "1m", "failure_ttl": "2s"}))
+	require.NoError(t, err)
+	cache := source.(*cachedValue)
+	now := time.Now()
+	cache.now = func() time.Time { return now }
+	for range 4 {
+		value, err := source.Get(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, "synthetic-cached-secret", value)
+		now = now.Add(time.Minute)
+	}
+	require.Equal(t, 4, calls)
+}
+
+func TestTurnkeyTransportFailureDoesNotLogDetails(t *testing.T) {
+	originalTransport, originalStdout := http.DefaultTransport, os.Stdout
+	capture, err := os.CreateTemp(t.TempDir(), "stdout")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		http.DefaultTransport, os.Stdout = originalTransport, originalStdout
+		require.NoError(t, capture.Close())
+	})
+	os.Stdout = capture
+	calls := 0
+	http.DefaultTransport = turnkeyRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls++
+		return nil, errors.New("sensitive-transport-detail")
+	})
+	t.Setenv("TEST_TURNKEY_KEY", strings.Repeat("0", 63)+"1")
+	source, err := newTurnkeyBuilder(slog.New(slog.NewTextHandler(io.Discard, nil))).Build(yamlNode(t, map[string]string{
+		"organization_id": "test-org", "secret_id": "test-secret", "api_private_key_env": "TEST_TURNKEY_KEY",
+	}))
+	require.NoError(t, err)
+	_, err = source.Get(context.Background())
+	require.EqualError(t, err, "turnkey secret export failed")
+	require.Equal(t, 1, calls, "transport errors must not be retried")
+	output, err := os.ReadFile(capture.Name())
+	require.NoError(t, err)
+	require.Empty(t, string(output))
 }

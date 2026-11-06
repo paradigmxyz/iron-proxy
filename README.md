@@ -530,15 +530,40 @@ source:
 
 Keep the API private key in the trusted proxy process, outside the workload.
 Configure `require: true` on the inject or replace block to reject requests when
-the secret is unavailable. A pending human approval is currently treated as an
-unavailable secret; this source does not implement an approval UI or resume flow.
-Cached credentials can be reused until their TTL expires, so export approval is
-not approval of each HTTP request.
+the secret is unavailable. Before the first successful export, a pending human
+approval makes the secret unavailable. This source does not implement an approval UI or resume flow.
+After a successful export, refresh failures (including approval-required or denied
+exports) continue serving the cached credential, potentially indefinitely. Thus
+`require: true` does not reject requests on these refresh failures. `ttl` is a
+refresh interval, not a hard expiry or revocation deadline; export approval is
+not approval of each HTTP request. Do not use this cache as a per-request approval
+or immediate-revocation boundary.
+
+For a credential-free agent-style smoke test, run:
+
+```sh
+go test -race ./internal/proxy -run '^TestTunnel_AgentSecretBoundary$' -v
+```
+
+This starts ephemeral local proxy and mock OpenAI-compatible provider listeners.
+An agent-style client sends a placeholder in `Authorization`; the proxy replaces
+it with a synthetic credential. The test also checks required-token and host
+rejections. It uses the environment source to simulate a successful secret fetch;
+it does not exercise live Turnkey export or run Hermes itself.
+
+For an agent such as Hermes, keep the Turnkey API key in the proxy process and
+give the agent only the configured `proxy_value`. Route the agent's HTTP client
+through the explicit proxy listener (including HTTPS CONNECT and a trusted proxy
+CA for HTTPS), and allowlist only the intended provider. Verify that the agent's
+HTTP library actually uses that proxy; environment variables alone do not enforce
+egress isolation. The agent must not inherit the proxy's credential environment.
 
 `ttl` controls how long a successfully fetched value is cached before refresh
 (empty caches forever). `failure_ttl` controls how long a fetch error is
 cached before retrying; it defaults to 1m and is independent of `ttl`, so a
-long success TTL does not delay recovery from a transient backend outage.
+long success TTL does not delay recovery from an initial backend outage.
+After a successful fetch, refresh errors serve the stale value and retry after
+half of `ttl`; `failure_ttl` applies only before the first success.
 
 For example, to select `api_key` from a KV v2 secret stored at
 `secret/services/openai`:
