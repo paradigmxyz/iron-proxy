@@ -106,7 +106,7 @@ func Compile(c Config) (*Gateway, error) {
 		if len(rc.Rules) == 0 {
 			return nil, fmt.Errorf("mcp_gateway.routes[%q]: at least one rule is required", rc.Name)
 		}
-		rules, err := hostmatch.CompileRules(rc.Rules, fmt.Sprintf("mcp_gateway.routes[%q]", rc.Name))
+		rules, err := hostmatch.CompileRulesAllowRequireTLS(rc.Rules, fmt.Sprintf("mcp_gateway.routes[%q]", rc.Name))
 		if err != nil {
 			return nil, err
 		}
@@ -203,10 +203,9 @@ func (g *Gateway) Match(req *http.Request) *Route {
 	if g == nil {
 		return nil
 	}
-	host := hostmatch.StripPort(req.Host)
 	for _, route := range g.routes {
 		for _, rule := range route.rules {
-			if rule.Matches(host, req.Method, req.URL.Path) {
+			if rule.MatchesRequest(req) {
 				return route
 			}
 		}
