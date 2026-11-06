@@ -501,6 +501,9 @@ Secret sources:
 - **`1password`:** resolves `secret_ref` (an `op://vault/item/[section/]field`
   reference) using a 1Password service account token. The token is read from
   `OP_SERVICE_ACCOUNT_TOKEN`. Optional `ttl` and `failure_ttl` are supported.
+- **`turnkey`:** exports `secret_id` from `organization_id` using a proxy-side
+  API key. See [Turnkey Managed Secrets](#turnkey-managed-secrets) for cache,
+  approval, retry, and credential-rotation behavior.
 - **`1password_connect`:** resolves the same `op://vault/item/[section/]field`
   `secret_ref` against a self-hosted 1Password Connect server. The server URL
   is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN`.
@@ -509,54 +512,6 @@ Secret sources:
 Every source also accepts an optional `json_key`. When set, the resolved value
 is parsed as a JSON object and the single top-level string field at that key is
 extracted. Use it to pull one field out of a JSON secret.
-
-**Turnkey Managed Secrets:** use `type: turnkey` with `organization_id` and
-`secret_id`. The proxy reads its API private key from `TURNKEY_API_PRIVATE_KEY`,
-or the environment variable named by `api_private_key_env`. Give that API identity
-a policy scoped to exporting the intended secret. The SDK verifies the Signer
-signature and organization and decrypts an export encrypted to a fresh recipient
-key generated in the proxy. Optional `ttl`, `failure_ttl`, and `json_key` use the
-same cache and extraction behavior as other sources.
-
-```yaml
-source:
-  type: turnkey
-  organization_id: "<organization-id>"
-  secret_id: "<secret-id>"
-  api_private_key_env: TURNKEY_API_PRIVATE_KEY
-  ttl: 1m
-  failure_ttl: 2s
-```
-
-Keep the API private key in the trusted proxy process, outside the workload.
-Configure `require: true` on the inject or replace block to reject requests when
-the secret is unavailable. Before the first successful export, a pending human
-approval makes the secret unavailable. This source does not implement an approval UI or resume flow.
-After a successful export, refresh failures (including approval-required or denied
-exports) continue serving the cached credential, potentially indefinitely. Thus
-`require: true` does not reject requests on these refresh failures. `ttl` is a
-refresh interval, not a hard expiry or revocation deadline; export approval is
-not approval of each HTTP request. Do not use this cache as a per-request approval
-or immediate-revocation boundary.
-
-For a credential-free agent-style smoke test, run:
-
-```sh
-go test -race ./internal/proxy -run '^TestTunnel_AgentSecretBoundary$' -v
-```
-
-This starts ephemeral local proxy and mock OpenAI-compatible provider listeners.
-An agent-style client sends a placeholder in `Authorization`; the proxy replaces
-it with a synthetic credential. The test also checks required-token and host
-rejections. It uses the environment source to simulate a successful secret fetch;
-it does not exercise live Turnkey export or run Hermes itself.
-
-For an agent such as Hermes, keep the Turnkey API key in the proxy process and
-give the agent only the configured `proxy_value`. Route the agent's HTTP client
-through the explicit proxy listener (including HTTPS CONNECT and a trusted proxy
-CA for HTTPS), and allowlist only the intended provider. Verify that the agent's
-HTTP library actually uses that proxy; environment variables alone do not enforce
-egress isolation. The agent must not inherit the proxy's credential environment.
 
 `ttl` controls how long a successfully fetched value is cached before refresh
 (empty caches forever). `failure_ttl` controls how long a fetch error is
@@ -586,6 +541,88 @@ iron-proxy.
   > **Note:** a bug in `onepassword-sdk-go` breaks builds with `CGO_ENABLED=0`,
   > so iron-proxy pins a [fork](https://github.com/ironsh/onepassword-sdk-go)
   > via a `replace` directive in `go.mod` until the fix lands upstream.
+
+#### Turnkey Managed Secrets
+
+Use `type: turnkey` with `organization_id` and
+`secret_id`. The proxy reads its API private key from `TURNKEY_API_PRIVATE_KEY`,
+or the environment variable named by `api_private_key_env`. Give that API identity
+a policy scoped to exporting the intended secret. The SDK verifies the Signer
+signature and organization and decrypts an export encrypted to a fresh recipient
+key generated in the proxy. Optional `ttl`, `failure_ttl`, and `json_key` use the
+same cache and extraction behavior as other sources.
+
+```yaml
+source:
+  type: turnkey
+  organization_id: "<organization-id>"
+  secret_id: "<secret-id>"
+  api_private_key_env: TURNKEY_API_PRIVATE_KEY
+  ttl: 1m
+  failure_ttl: 2s
+```
+
+Keep the API private key in the trusted proxy process, outside the workload.
+Configure `require: true` on the inject or replace block to reject requests when
+the secret is unavailable. Before the first successful export, a pending human
+approval makes the secret unavailable. This source does not implement an approval
+UI or resume flow.
+After a successful export, refresh failures (including approval-required or denied
+exports) continue serving the cached credential, potentially indefinitely. Thus
+`require: true` does not reject requests on these refresh failures. `ttl` is a
+refresh interval, not a hard expiry or revocation deadline; export approval is
+not approval of each HTTP request. Do not use this cache as a per-request approval
+or immediate-revocation boundary.
+
+Clients are reused across secrets with the same organization and API-key environment
+variable name. A successful initialization captures the signing key until config
+reload or process restart; changing that environment variable does not rotate an
+already cached client. Failed initialization is retried after the source's failure
+cache expires.
+
+Each fetch has a 30-second overall deadline and a 25-second HTTP timeout. The SDK
+retries transport errors and HTTP 5xx responses at most twice (three attempts),
+reusing the same serialized body, stamp, and export recipient key. Turnkey's
+[activity submission idempotency](https://docs.turnkey.com/api-reference/activities/overview)
+is based on the request body. The whole export operation is not retried within a
+fetch. Redirects and HTTP 4xx responses are not retried. A later cache refresh is
+a separate export with a fresh recipient key.
+
+Errors expose only fixed categories such as `approval_required`,
+`authentication_failed`, `permission_denied`, `rate_limited`, `timeout`, and
+`service_unavailable`. SDK messages, response bodies, and activity details are
+not logged. Unclassified errors use `export_failed`.
+
+For a credential-free test of the Turnkey source, real SDK signature verification
+and decryption, JSON extraction, retries, and required-secret rejection, run:
+
+```sh
+go test -race ./internal/transform/secrets -run '^TestTurnkeySourceSDKExportThroughTransform$' -v
+```
+
+This uses signed synthetic exports from a local server and a test-only Signer key.
+Production source configuration cannot override the API endpoint or Signer key.
+
+#### Agent proxy smoke test
+
+For a credential-free agent-style smoke test, run:
+
+```sh
+go test -race ./internal/proxy -run '^TestTunnel_AgentSecretBoundary$' -v
+```
+
+This starts ephemeral local proxy and mock OpenAI-compatible provider listeners.
+An agent-style client sends a placeholder in `Authorization`; the proxy replaces
+it with a synthetic credential. The test also checks required-token and host
+rejections. It uses the environment source to simulate a successful secret fetch;
+it does not exercise live Turnkey export or run Hermes itself.
+
+For an agent such as Hermes, keep the Turnkey API key in the proxy process and
+give the agent only the configured `proxy_value`. Route the agent's HTTP client
+through the explicit proxy listener (including HTTPS CONNECT and a trusted proxy
+CA for HTTPS), and allowlist only the intended provider. Verify that the agent's
+HTTP library actually uses that proxy; environment variables alone do not enforce
+egress isolation. The agent must not inherit the proxy's credential environment.
 
 ### Judge
 

@@ -139,7 +139,7 @@ func TestTurnkeyBuilderFailuresDoNotExposeSecrets(t *testing.T) {
 
 func TestNewTurnkeyClientDoesNotExposeInvalidKey(t *testing.T) {
 	for _, key := range []string{"", "invalid-test-only-key"} {
-		t.Run("invalid_key", func(t *testing.T) {
+		t.Run("key="+key, func(t *testing.T) {
 			t.Setenv("TEST_TURNKEY_KEY", key)
 			_, err := newTurnkeyClient("test-org", "TEST_TURNKEY_KEY")
 			require.Error(t, err)
@@ -174,11 +174,9 @@ func TestTurnkeyFactoryRejectsRequiredUnavailableSecret(t *testing.T) {
 func TestTurnkeyClientRejectsRedirects(t *testing.T) {
 	for _, status := range []int{301, 302, 303, 307, 308} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
-			original := http.DefaultTransport
-			t.Cleanup(func() { http.DefaultTransport = original })
 			calls := 0
 			body := &trackedTurnkeyBody{Reader: strings.NewReader("redirect")}
-			http.DefaultTransport = turnkeyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
+			transport := turnkeyRoundTripFunc(func(req *http.Request) (*http.Response, error) {
 				calls++
 				if calls > 1 {
 					return nil, errors.New("redirect target reached")
@@ -188,7 +186,7 @@ func TestTurnkeyClientRejectsRedirects(t *testing.T) {
 				return &http.Response{StatusCode: status, Header: http.Header{"Location": {"https://redirect.invalid/export"}}, Body: body, Request: req}, nil
 			})
 			t.Setenv("TEST_TURNKEY_KEY", strings.Repeat("0", 63)+"1")
-			client, err := newTurnkeyClient("test-org", "TEST_TURNKEY_KEY")
+			client, err := newTurnkeySDKClient("test-org", "TEST_TURNKEY_KEY", transport)
 			require.NoError(t, err)
 			_, err = client.ExportSecret(context.Background(), "test-org", "test-secret")
 			require.Error(t, err)
@@ -235,27 +233,28 @@ func TestTurnkeyApprovalFailureAfterSuccessServesStale(t *testing.T) {
 }
 
 func TestTurnkeyTransportFailureDoesNotLogDetails(t *testing.T) {
-	originalTransport, originalStdout := http.DefaultTransport, os.Stdout
+	originalStdout := os.Stdout
 	capture, err := os.CreateTemp(t.TempDir(), "stdout")
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		http.DefaultTransport, os.Stdout = originalTransport, originalStdout
+		os.Stdout = originalStdout
 		require.NoError(t, capture.Close())
 	})
 	os.Stdout = capture
 	calls := 0
-	http.DefaultTransport = turnkeyRoundTripFunc(func(*http.Request) (*http.Response, error) {
+	transport := turnkeyRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		calls++
 		return nil, errors.New("sensitive-transport-detail")
 	})
 	t.Setenv("TEST_TURNKEY_KEY", strings.Repeat("0", 63)+"1")
-	source, err := newTurnkeyBuilder(slog.New(slog.NewTextHandler(io.Discard, nil))).Build(yamlNode(t, map[string]string{
+	builder := &turnkeyBuilder{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clientFor: func(org, env string) (turnkeyClient, error) { return newTurnkeySDKClient(org, env, transport) }}
+	source, err := builder.Build(yamlNode(t, map[string]string{
 		"organization_id": "test-org", "secret_id": "test-secret", "api_private_key_env": "TEST_TURNKEY_KEY",
 	}))
 	require.NoError(t, err)
 	_, err = source.Get(context.Background())
-	require.EqualError(t, err, "turnkey secret export failed")
-	require.Equal(t, 1, calls, "transport errors must not be retried")
+	require.EqualError(t, err, "turnkey secret export failed (transport_failed)")
+	require.Equal(t, 3, calls, "transport errors must stop after two retries")
 	output, err := os.ReadFile(capture.Name())
 	require.NoError(t, err)
 	require.Empty(t, string(output))

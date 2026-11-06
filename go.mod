@@ -21,6 +21,7 @@ require (
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
+	github.com/tkhq/go-sdk/crypto v0.3.0
 	github.com/tkhq/go-sdk/v2 v2.3.0
 	github.com/wasilibs/go-pgquery v0.0.0-20260428021157-dca720e45577
 	github.com/zeebo/blake3 v0.2.4
@@ -124,7 +125,6 @@ require (
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834 // indirect
 	github.com/tetratelabs/wazero v1.11.0 // indirect
-	github.com/tkhq/go-sdk/crypto v0.3.0 // indirect
 	github.com/tkhq/go-sdk/encoding v0.2.0 // indirect
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
