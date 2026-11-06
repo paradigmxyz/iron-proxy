@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
@@ -850,14 +849,18 @@ func TestIntegration_CONNECT_HTTP2(t *testing.T) {
 	}
 
 	// HTTP/2 client that CONNECT-tunnels through the proxy and trusts the MITM CA.
+	clientTLSConfig := &tls.Config{
+		RootCAs:    caPool,
+		ServerName: allowedHost,
+		NextProtos: []string{"h2"},
+	}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
 	client := &http.Client{
-		Transport: &http2.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    caPool,
-				ServerName: allowedHost,
-				NextProtos: []string{"h2"},
-			},
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+		Transport: &http.Transport{
+			Protocols:       protocols,
+			TLSClientConfig: clientTLSConfig,
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
 				if err != nil {
 					return nil, err
@@ -875,7 +878,7 @@ func TestIntegration_CONNECT_HTTP2(t *testing.T) {
 					_ = conn.Close()
 					return nil, fmt.Errorf("CONNECT failed: %d", resp.StatusCode)
 				}
-				tlsConn := tls.Client(conn, cfg)
+				tlsConn := tls.Client(conn, clientTLSConfig)
 				if err := tlsConn.HandshakeContext(ctx); err != nil {
 					_ = conn.Close()
 					return nil, err
@@ -966,11 +969,15 @@ func TestIntegration_DirectHTTPS_HTTP2(t *testing.T) {
 	const fakeHost = "direct-h2.example.com"
 	_, httpsAddr, caPool := startDirectHTTPSProxy(t, []string{fakeHost}, upstream.Listener.Addr().String(), logger)
 
+	clientTLSConfig := &tls.Config{RootCAs: caPool, ServerName: fakeHost, NextProtos: []string{"h2"}}
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
 	client := &http.Client{
-		Transport: &http2.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: caPool, ServerName: fakeHost, NextProtos: []string{"h2"}},
-			DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-				return (&tls.Dialer{Config: cfg}).DialContext(ctx, "tcp", httpsAddr)
+		Transport: &http.Transport{
+			Protocols:       protocols,
+			TLSClientConfig: clientTLSConfig,
+			DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return (&tls.Dialer{Config: clientTLSConfig}).DialContext(ctx, "tcp", httpsAddr)
 			},
 		},
 	}
