@@ -494,16 +494,16 @@ HTTPS). A plain-HTTP request then keeps its proxy token:
             require_tls: true
 ```
 
-`require_tls` defaults to `false`. It is accepted only where a rule not
-matching is safe:
-
-- the credential injectors: `secrets`, `aws_auth`, `gcp_auth`,
-  `gcp_id_token`, `oauth_token`, `hmac_sign`, and MCP gateway routes;
-- `allowlist`, where not matching means the request is denied.
+`require_tls` defaults to `false`. It is accepted only by the credential
+injectors, where a rule not matching means no credential is added: `secrets`,
+`aws_auth`, `gcp_auth`, `gcp_id_token`, `oauth_token`, `hmac_sign`, and MCP
+gateway routes.
 
 Everywhere else it is a config error. On a rule that enforces a policy
 (`judge`, `header_allowlist`, `grpc`, `body_capture`, `annotate`, MCP policy),
-plain-HTTP requests would stop matching and skip the policy.
+plain-HTTP requests would stop matching and skip the policy. On `allowlist`,
+the tunnel's `CONNECT` preflight is not TLS either, so the host would become
+unreachable through the tunnel listener.
 
 Secret sources:
 

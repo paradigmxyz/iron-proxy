@@ -70,10 +70,8 @@ func CompileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
 	return compileRules(configs, prefix)
 }
 
-// CompileRulesAllowRequireTLS is CompileRules for callers where a rule not
-// matching is safe: a credential injector (no match means no credential is
-// added) or a fail-closed gate like allowlist (no match means denied). Only
-// those callers may accept require_tls.
+// CompileRulesAllowRequireTLS is CompileRules for the credential injectors,
+// where a rule not matching is safe: no match means no credential is added.
 func CompileRulesAllowRequireTLS(configs []RuleConfig, prefix string) ([]Rule, error) {
 	return compileRules(configs, prefix)
 }
