@@ -1,0 +1,55 @@
+dns:
+  enabled: false
+
+proxy:
+  http_listen: "127.0.0.1:0"
+  https_listen: "127.0.0.1:0"
+  upstream_deny_cidrs: []
+
+tls:
+  ca_cert: tmp/ca.crt
+  ca_key: tmp/ca.key
+
+transforms:
+  - name: allowlist
+    config:
+      domains: ["127.0.0.1"]
+  - name: secrets
+    config:
+      secrets:
+        - source: {type: env, var: IRON_SELECTION_SECRET_A}
+          selection_group: provider-account
+          replace:
+            proxy_value: account-a
+            match_headers: [Authorization]
+            require: true
+          rules:
+            - {host: "127.0.0.1", methods: [POST], paths: ["/*"]}
+        - source: {type: file, path: "{{.SecretPathB}}"}
+          selection_group: provider-account
+          replace:
+            proxy_value: account-b
+            match_headers: [Authorization]
+            require: true
+          rules:
+            - {host: "127.0.0.1", methods: [POST], paths: ["/*"]}
+{{if .IncludeC}}
+        - source: {type: env, var: IRON_SELECTION_SECRET_C}
+          selection_group: provider-account
+          replace:
+            proxy_value: account-c
+            match_headers: [Authorization]
+            require: true
+          rules:
+            - {host: "127.0.0.1", methods: [POST], paths: ["/*"]}
+{{end}}
+
+management:
+  listen: "127.0.0.1:0"
+  api_key_env: IRON_SELECTION_MANAGEMENT_KEY
+
+metrics:
+  listen: "127.0.0.1:0"
+
+log:
+  level: info
