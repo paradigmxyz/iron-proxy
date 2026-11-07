@@ -177,6 +177,47 @@ secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
 		require.Nil(t, a.allowedServices)
 	})
 
+	t.Run("static session token is carried into the credentials", func(t *testing.T) {
+		withToken := map[string]secrets.Source{
+			"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "ASIA"},
+			"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "shh"},
+			"AWS_SESSION_TOKEN":     &staticSource{name: "token", value: "session-token"},
+		}
+		a := buildTransformWith(t, `
+access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
+secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
+session_token:     {type: env, var: AWS_SESSION_TOKEN}
+rules:
+  - host: "*.amazonaws.com"
+`, mapBuilder(withToken))
+		require.Equal(t, "static", a.credsKind())
+		creds, err := a.creds.Retrieve(context.Background())
+		require.NoError(t, err)
+		require.Equal(t, "ASIA", creds.AccessKeyID)
+		require.Equal(t, "session-token", creds.SessionToken)
+	})
+
+	t.Run("without a session token the static credentials are long-term", func(t *testing.T) {
+		a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
+		creds, err := a.creds.Retrieve(context.Background())
+		require.NoError(t, err)
+		require.Empty(t, creds.SessionToken)
+	})
+
+	t.Run("rejects a session token without static keys", func(t *testing.T) {
+		var c config
+		node := yamlFromString(t, `
+session_token: {type: env, var: AWS_SESSION_TOKEN}
+credentials_provider:
+  type: workload_identity
+rules:
+  - host: "*.amazonaws.com"
+`)
+		require.NoError(t, node.Decode(&c))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), errCredBuilder)
+		require.ErrorContains(t, err, "session_token is only valid with access_key_id and secret_access_key")
+	})
+
 	t.Run("rejects both static and credentials_provider", func(t *testing.T) {
 		var c config
 		node := yamlFromString(t, `
@@ -361,6 +402,28 @@ rules:
 		require.Equal(t, "IQoJb3JpZ2luX2VjE...", req.Header.Get("X-Amz-Security-Token"))
 		require.Contains(t, req.Header.Get("Authorization"), "ASIAEXAMPLE")
 		require.Equal(t, int64(1), stub.calls.Load())
+	})
+
+	t.Run("static session token populates security-token header", func(t *testing.T) {
+		withToken := map[string]secrets.Source{
+			"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "ASIAEXAMPLE"},
+			"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+			"AWS_SESSION_TOKEN":     &staticSource{name: "token", value: "IQoJb3JpZ2luX2VjE..."},
+		}
+		a := buildTransformWith(t, `
+access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
+secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
+session_token:     {type: env, var: AWS_SESSION_TOKEN}
+rules:
+  - host: "*.amazonaws.com"
+`, mapBuilder(withToken))
+
+		req := signedRequest(t, http.MethodGet, "https://bucket.s3.us-east-1.amazonaws.com/key", "us-east-1", "s3", nil, 1<<20)
+		_, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, "IQoJb3JpZ2luX2VjE...", req.Header.Get("X-Amz-Security-Token"))
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=ASIAEXAMPLE/")
+		require.Contains(t, req.Header.Get("Authorization"), "x-amz-security-token")
 	})
 
 	t.Run("placeholder signature is stripped before re-signing", func(t *testing.T) {

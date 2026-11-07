@@ -536,6 +536,7 @@ transforms:
   #   config:
   #     access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
   #     secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
+  #     # session_token:   {type: env, var: AWS_SESSION_TOKEN}   # optional; for temporary (STS) credentials
   #     # allowed_regions:  ["us-east-1", "eu-west-1"]           # optional safety gate; default allows any region
   #     # allowed_services: ["bedrock", "s3", "dynamodb"]        # optional safety gate; default allows any service
   #     # unsigned_payload: false
