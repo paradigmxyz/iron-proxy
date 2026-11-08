@@ -271,12 +271,16 @@ func TestAudit_EmptyTransforms(t *testing.T) {
 // the audit emitters without pulling in the bodycapture package (which would
 // cause an import cycle via its dependency on transform).
 type fakeBodyCapture struct {
-	body      string
-	truncated bool
+	body              string
+	truncated         bool
+	respBody          string
+	respBodyTruncated bool
 }
 
-func (f *fakeBodyCapture) RequestBody() string        { return f.body }
-func (f *fakeBodyCapture) RequestBodyTruncated() bool { return f.truncated }
+func (f *fakeBodyCapture) RequestBody() string         { return f.body }
+func (f *fakeBodyCapture) RequestBodyTruncated() bool  { return f.truncated }
+func (f *fakeBodyCapture) ResponseBody() string        { return f.respBody }
+func (f *fakeBodyCapture) ResponseBodyTruncated() bool { return f.respBodyTruncated }
 
 func TestAudit_BodyCapture_PopulatesGroup(t *testing.T) {
 	result := &PipelineResult{
@@ -359,4 +363,55 @@ func TestAudit_BodyCapture_EmptyBodyOmitsGroup(t *testing.T) {
 
 	_, hasGroup := parsed["body_capture"]
 	require.False(t, hasGroup, "body_capture group should be absent when RequestBody() is empty")
+}
+
+func TestAudit_BodyCapture_ResponseFieldsJoinTheSameGroup(t *testing.T) {
+	// The response half is namespaced alongside the request half rather than
+	// getting a group of its own, so a consumer reads one record shape.
+	result := &PipelineResult{
+		Host:       "api.anthropic.com",
+		Method:     "POST",
+		Path:       "/v1/messages",
+		StartedAt:  time.Now(),
+		Duration:   1 * time.Millisecond,
+		Action:     ActionContinue,
+		StatusCode: 200,
+		BodyCapture: &fakeBodyCapture{
+			body:              `{"prompt":"hi"}`,
+			respBody:          "data: {\"delta\":\"hello\"}\n\n",
+			respBodyTruncated: true,
+		},
+	}
+
+	parsed, raw := captureAuditLog(result)
+
+	bc, ok := parsed["body_capture"].(map[string]any)
+	require.True(t, ok, "body_capture group should be present. raw=%s", raw)
+	require.Equal(t, `{"prompt":"hi"}`, bc["request_body"])
+	require.Equal(t, false, bc["request_body_truncated"])
+	require.Equal(t, "data: {\"delta\":\"hello\"}\n\n", bc["response_body"])
+	require.Equal(t, true, bc["response_body_truncated"])
+}
+
+func TestAudit_BodyCapture_ResponseOnlyStillEmitsGroup(t *testing.T) {
+	// A matching GET has no request body but its reply is still worth keeping,
+	// so the group appears with only the response half.
+	result := &PipelineResult{
+		Host:        "api.anthropic.com",
+		Method:      "GET",
+		Path:        "/v1/models",
+		StartedAt:   time.Now(),
+		Duration:    1 * time.Millisecond,
+		Action:      ActionContinue,
+		StatusCode:  200,
+		BodyCapture: &fakeBodyCapture{respBody: `{"data":[]}`},
+	}
+
+	parsed, raw := captureAuditLog(result)
+
+	bc, ok := parsed["body_capture"].(map[string]any)
+	require.True(t, ok, "body_capture group should be present. raw=%s", raw)
+	require.NotContains(t, bc, "request_body")
+	require.Equal(t, `{"data":[]}`, bc["response_body"])
+	require.Equal(t, false, bc["response_body_truncated"])
 }

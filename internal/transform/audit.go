@@ -89,11 +89,26 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 			}
 			attrs = append(attrs, slog.Group("mcp", mcpAttrs...))
 		}
-		if result.BodyCapture != nil && result.BodyCapture.RequestBody() != "" {
-			attrs = append(attrs, slog.Group("body_capture",
-				slog.String("request_body", result.BodyCapture.RequestBody()),
-				slog.Bool("request_body_truncated", result.BodyCapture.RequestBodyTruncated()),
-			))
+		if result.BodyCapture != nil {
+			var bodyAttrs []any
+			if body := result.BodyCapture.RequestBody(); body != "" {
+				bodyAttrs = append(bodyAttrs,
+					slog.String("request_body", body),
+					slog.Bool("request_body_truncated", result.BodyCapture.RequestBodyTruncated()),
+				)
+			}
+			// Safe to read the response half here: this callback fires after the
+			// response body has been streamed to the client, so the tee has seen
+			// everything it is going to see.
+			if body := result.BodyCapture.ResponseBody(); body != "" {
+				bodyAttrs = append(bodyAttrs,
+					slog.String("response_body", body),
+					slog.Bool("response_body_truncated", result.BodyCapture.ResponseBodyTruncated()),
+				)
+			}
+			if len(bodyAttrs) > 0 {
+				attrs = append(attrs, slog.Group("body_capture", bodyAttrs...))
+			}
 		}
 
 		switch {
