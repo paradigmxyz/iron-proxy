@@ -206,6 +206,31 @@ func TestSecrets_BodySwap(t *testing.T) {
 	require.Contains(t, string(result), `"model": "gpt-4"`)
 }
 
+func TestSecrets_BodySwapAfterAbsentBodySecret(t *testing.T) {
+	// The first body secret's placeholder is not in the request.
+	s := makeSecrets(t, []secretEntry{
+		defaultEntry(func(e *secretEntry) {
+			e.Source = envSource("ANTHROPIC_API_KEY")
+			e.ProxyValue = "proxy-anthropic-xyz789"
+			e.MatchHeaders = nil
+			e.MatchBody = true
+		}),
+		defaultEntry(func(e *secretEntry) {
+			e.MatchHeaders = nil
+			e.MatchBody = true
+		}),
+	})
+
+	req := openaiReq("POST", "/v1/chat")
+	req.Body = transform.NewBufferedBody(io.NopCloser(strings.NewReader(`{"api_key": "proxy-openai-abc123"}`)), 1<<20)
+
+	doTransform(t, s, req)
+
+	result, err := io.ReadAll(req.Body)
+	require.NoError(t, err)
+	require.Equal(t, `{"api_key": "sk-real-openai-key"}`, string(result))
+}
+
 func TestSecrets_HostMatch(t *testing.T) {
 	s := makeSecrets(t, []secretEntry{defaultEntry()})
 
