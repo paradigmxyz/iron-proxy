@@ -447,7 +447,8 @@ The sandbox never holds real credentials. Instead:
 
 1. Configure iron-proxy with the real secret source: environment variables, a
    file on disk, AWS Secrets Manager, AWS Systems Manager Parameter Store,
-   Vault KV, 1Password (service account), or 1Password Connect.
+   Google Cloud Secret Manager, Vault KV, 1Password (service account), or
+   1Password Connect.
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
 3. Configure the `secrets` transform to map proxy tokens to those sources.
 
@@ -490,6 +491,13 @@ Secret sources:
   `region`, `with_decryption`, `ttl`, and `failure_ttl` are supported.
   `with_decryption` defaults to `true`, which is the expected setting for
   `SecureString` parameters.
+- **`gcp_sm`:** reads `secret` in `project` from Google Cloud Secret Manager.
+  `version` defaults to `latest`; set `location` (e.g. `us-east1`) for a
+  regional secret. Credentials come from Application Default Credentials
+  (`GOOGLE_APPLICATION_CREDENTIALS`, GKE Workload Identity, or the GCE metadata
+  server); the identity needs `roles/secretmanager.secretAccessor`. The value is
+  the exact payload (no trimming), so create versions with `printf`, not `echo`.
+  Optional `ttl` and `failure_ttl` are supported.
 - **`vault_kv`:** reads the secret map at `path` from the Vault KV engine mounted
   at `mount`. `kv_version` may be `1` or `2` and defaults to `2`. The map is
   returned as JSON; set `json_key` to select one top-level string field. The
