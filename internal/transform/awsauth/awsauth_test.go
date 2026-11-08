@@ -514,6 +514,71 @@ rules:
 	})
 }
 
+func TestTransformRequestSignsEscapedS3PathsWithoutReescaping(t *testing.T) {
+	cases := []struct {
+		name                   string
+		url                    string
+		service                string
+		disableURIPathEscaping bool
+	}{
+		{
+			name:                   "s3 plain key",
+			url:                    "https://bucket.s3.us-east-1.amazonaws.com/plain.zip",
+			service:                "s3",
+			disableURIPathEscaping: true,
+		},
+		{
+			name:                   "s3 key with spaces",
+			url:                    "https://bucket.s3.us-east-1.amazonaws.com/JULY%2027.zip",
+			service:                "s3",
+			disableURIPathEscaping: true,
+		},
+		{
+			name:                   "s3 key with escaped slash",
+			url:                    "https://bucket.s3.us-east-1.amazonaws.com/folder%2Ffile.zip",
+			service:                "s3",
+			disableURIPathEscaping: true,
+		},
+		{
+			name:    "other AWS services retain default escaping",
+			url:     "https://bedrock-runtime.us-east-1.amazonaws.com/model/a%20b/invoke",
+			service: "bedrock",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srcs := map[string]secrets.Source{
+				"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "AKIAEXAMPLE"},
+				"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+			}
+			a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
+			signingTime := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+			a.now = func() time.Time { return signingTime }
+
+			req := signedRequest(t, http.MethodGet, tc.url, "us-east-1", tc.service, nil, 1<<20)
+			escapedPath := req.URL.EscapedPath()
+			expected := req.Clone(context.Background())
+			stripInboundSignatureHeaders(expected)
+			expected.Header.Set("X-Amz-Content-Sha256", emptyPayloadSHA256)
+			signer := v4.NewSigner(func(o *v4.SignerOptions) {
+				o.DisableURIPathEscaping = tc.disableURIPathEscaping
+			})
+			creds := aws.Credentials{
+				AccessKeyID:     "AKIAEXAMPLE",
+				SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+			}
+			require.NoError(t, signer.SignHTTP(context.Background(), creds, expected, emptyPayloadSHA256, tc.service, "us-east-1", signingTime))
+
+			res, err := a.TransformRequest(context.Background(), newContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionContinue, res.Action)
+			require.Equal(t, escapedPath, req.URL.EscapedPath())
+			require.Equal(t, expected.Header.Get("Authorization"), req.Header.Get("Authorization"))
+		})
+	}
+}
+
 func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
