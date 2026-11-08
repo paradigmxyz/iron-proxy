@@ -29,6 +29,15 @@ dns:
 proxy:
   http_listen: ":80"
   https_listen: ":443"
+  # Optional reverse listener for clients that can neither trust the MITM CA
+  # nor route through the proxy, such as Cloudflare Workers: they reach it under
+  # the proxy's own name with a client certificate issued by client_ca, and name
+  # the upstream in the path (https://<proxy>/<host>/<path>).
+  # reverse:
+  #   listen: ":8444"
+  #   cert: "/etc/iron-proxy/server.crt"
+  #   key: "/etc/iron-proxy/server.key"
+  #   client_ca: "/etc/iron-proxy/clients.crt"
   # Global body buffer limits for transforms.
   max_request_body_bytes: 1048576   # default: 1 MiB
   # max_response_body_bytes: 0      # default: 0 (uncapped)

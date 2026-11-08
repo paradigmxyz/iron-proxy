@@ -124,6 +124,37 @@ tls:
 			wantErr: "tls.ca_key is required",
 		},
 		{
+			name: "reverse listener without a certificate",
+			yaml: `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+proxy:
+  reverse:
+    listen: ":8444"
+    client_ca: "/tmp/clients.crt"
+`,
+			wantErr: "proxy.reverse.cert and proxy.reverse.key are required",
+		},
+		{
+			name: "reverse listener without client_ca",
+			yaml: `
+dns:
+  proxy_ip: "10.0.0.1"
+tls:
+  ca_cert: "/tmp/ca.crt"
+  ca_key: "/tmp/ca.key"
+proxy:
+  reverse:
+    listen: ":8444"
+    cert: "/tmp/server.crt"
+    key: "/tmp/server.key"
+`,
+			wantErr: "proxy.reverse.client_ca is required",
+		},
+		{
 			name: "invalid log level",
 			yaml: `
 dns:
