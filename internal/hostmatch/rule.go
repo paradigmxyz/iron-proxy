@@ -2,6 +2,7 @@ package hostmatch
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -10,6 +11,7 @@ import (
 type RuleConfig struct {
 	Host    string   `yaml:"host,omitempty"`
 	CIDR    string   `yaml:"cidr,omitempty"`
+	Ports   []string `yaml:"ports,omitempty"`
 	Methods []string `yaml:"methods,omitempty"`
 	Paths   []string `yaml:"paths,omitempty"`
 }
@@ -17,13 +19,17 @@ type RuleConfig struct {
 // Rule is a compiled matching rule ready for use.
 type Rule struct {
 	Matcher *Matcher
+	Ports   map[string]bool // nil = all ports
 	Methods map[string]bool // nil = all methods
 	Paths   []string        // nil = all paths
 }
 
 // Matches returns true if the request matches this rule.
-func (r *Rule) Matches(host, method, path string) bool {
+func (r *Rule) Matches(host, port, method, path string) bool {
 	if !r.Matcher.Matches(host) {
+		return false
+	}
+	if r.Ports != nil && !r.Ports[port] {
 		return false
 	}
 	if r.Methods != nil && !r.Methods[method] {
@@ -67,6 +73,15 @@ func CompileRules(configs []RuleConfig, prefix string) ([]Rule, error) {
 		}
 
 		r := Rule{Matcher: m}
+		if len(rc.Ports) > 0 {
+			r.Ports = make(map[string]bool, len(rc.Ports))
+			for _, port := range rc.Ports {
+				if port == "" || strings.ContainsAny(port, "*?/\\") {
+					return nil, fmt.Errorf("%s: rules[%d]: invalid exact port %q", prefix, i, port)
+				}
+				r.Ports[port] = true
+			}
+		}
 		if !isWildcard(rc.Methods) {
 			r.Methods = make(map[string]bool, len(rc.Methods))
 			for _, method := range rc.Methods {
@@ -88,11 +103,25 @@ func isWildcard(methods []string) bool {
 
 // MatchAnyRule returns true if the request matches any rule in the list.
 func MatchAnyRule(rules []Rule, req *http.Request) bool {
-	host := StripPort(req.Host)
+	host, port := HostPort(req)
 	for _, r := range rules {
-		if r.Matches(host, req.Method, req.URL.Path) {
+		if r.Matches(host, port, req.Method, req.URL.Path) {
 			return true
 		}
 	}
 	return false
+}
+
+// HostPort returns the normalized request hostname and effective destination
+// port. It preserves explicit non-default ports instead of allowing a
+// hostname rule to silently authorize every service on that host.
+func HostPort(req *http.Request) (string, string) {
+	host := StripPort(req.Host)
+	if _, port, err := net.SplitHostPort(req.Host); err == nil {
+		return host, port
+	}
+	if req.URL != nil && strings.EqualFold(req.URL.Scheme, "https") || req.TLS != nil {
+		return host, "443"
+	}
+	return host, "80"
 }

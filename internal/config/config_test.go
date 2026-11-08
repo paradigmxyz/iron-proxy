@@ -418,6 +418,22 @@ tls:
 	})
 }
 
+func TestLoad_UpstreamPrivateExceptions(t *testing.T) {
+	yaml := validYAML() + `
+proxy:
+  upstream_private_exceptions:
+    managed-rpc: ["10.23.4.5/32"]
+`
+	cfg, err := Load(strings.NewReader(yaml))
+	require.NoError(t, err)
+	require.Equal(t, map[string][]string{"managed-rpc": {"10.23.4.5/32"}}, cfg.Proxy.UpstreamPrivateExceptions)
+
+	yaml = strings.Replace(yaml, "managed-rpc:", "'*':", 1)
+	_, err = Load(strings.NewReader(yaml))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "proxy.upstream_private_exceptions")
+}
+
 func TestLoad_Management(t *testing.T) {
 	t.Run("disabled by default", func(t *testing.T) {
 		cfg, err := Load(strings.NewReader(validYAML()))
