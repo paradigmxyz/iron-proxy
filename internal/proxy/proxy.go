@@ -498,7 +498,7 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	if reqBodyLen >= 0 {
 		upstreamReq.ContentLength = int64(reqBodyLen)
 	} else {
-		upstreamReq.ContentLength = r.ContentLength
+		upstreamReq.ContentLength = reqBody.ForwardedLength(r.ContentLength)
 	}
 
 	var replayBody []byte

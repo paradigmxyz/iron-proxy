@@ -987,3 +987,86 @@ func TestIntegration_DirectHTTPS_HTTP2(t *testing.T) {
 	require.Equal(t, "trailer body", string(body))
 	require.Equal(t, "trailer-value", resp.Trailer.Get("X-Test-Trailer"))
 }
+
+// bodyReadingTransform reads the request body, like any match_body transform.
+type bodyReadingTransform struct {
+	replacement []byte
+}
+
+func (bodyReadingTransform) Name() string { return "body_reader" }
+
+func (b bodyReadingTransform) TransformRequest(_ context.Context, _ *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
+	if _, err := io.ReadAll(req.Body); err != nil {
+		return nil, err
+	}
+	if b.replacement != nil {
+		transform.RequireBufferedBody(req.Body).ReplaceBuffered(b.replacement)
+	}
+	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+func (bodyReadingTransform) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
+	return &transform.TransformResult{Action: transform.ActionContinue}, nil
+}
+
+func TestIntegration_RequestBodyBeyondLimitIsForwarded(t *testing.T) {
+	const limit = 8
+	const body = "0123456789abcdef"
+
+	cases := []struct {
+		name          string
+		replacement   []byte
+		contentLength int64
+		wantBody      string
+		wantLength    int64
+	}{
+		{name: "content length", contentLength: int64(len(body)), wantBody: body, wantLength: int64(len(body))},
+		{name: "chunked", contentLength: -1, wantBody: body, wantLength: -1},
+		{
+			name:          "replaced prefix with content length",
+			replacement:   []byte("ABCDEFGHIJ"),
+			contentLength: int64(len(body)),
+			wantBody:      "ABCDEFGHIJ89abcdef",
+			wantLength:    18,
+		},
+		{
+			name:          "replaced prefix chunked",
+			replacement:   []byte("ABCDEFGHIJ"),
+			contentLength: -1,
+			wantBody:      "ABCDEFGHIJ89abcdef",
+			wantLength:    -1,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody string
+			var gotLength int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				data, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				gotBody = string(data)
+				gotLength = r.ContentLength
+			}))
+			defer upstream.Close()
+
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			pipeline := transform.NewPipeline(
+				[]transform.Transformer{bodyReadingTransform{replacement: tc.replacement}},
+				transform.BodyLimits{MaxRequestBodyBytes: limit},
+				logger,
+			)
+			p := New(Options{Pipeline: transform.NewPipelineHolder(pipeline), Logger: logger})
+
+			req := httptest.NewRequest(http.MethodPost, upstream.URL+"/upload", strings.NewReader(body))
+			req.ContentLength = tc.contentLength
+			recorder := httptest.NewRecorder()
+
+			p.handleDirectHTTP(recorder, req)
+
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Equal(t, tc.wantBody, gotBody)
+			require.Equal(t, tc.wantLength, gotLength)
+		})
+	}
+}

@@ -115,6 +115,66 @@ func TestBufferedBody_Len(t *testing.T) {
 	require.Equal(t, 5, body.Len())
 }
 
+type closeTracker struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeTracker) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestBufferedBody_BeyondLimit(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		replacement string
+		want        string
+		wantLen     int
+		wantForward int64
+	}{
+		{name: "over limit", input: "hello world", want: "hello world", wantLen: -1, wantForward: 11},
+		{name: "exactly at limit", input: "hello", want: "hello", wantLen: -1, wantForward: 5},
+		{name: "under limit", input: "hi", want: "hi", wantLen: 2, wantForward: 2},
+		{name: "replaced prefix", input: "hello world", replacement: "goodbye", want: "goodbye world", wantLen: -1, wantForward: 13},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := NewBufferedBody(io.NopCloser(strings.NewReader(tc.input)), 5)
+
+			seen, err := io.ReadAll(body)
+			require.NoError(t, err)
+			require.LessOrEqual(t, len(seen), 5)
+			if tc.replacement != "" {
+				body.ReplaceBuffered([]byte(tc.replacement))
+			}
+			body.Reset()
+
+			require.Equal(t, tc.wantLen, body.Len())
+			require.Equal(t, tc.wantForward, body.ForwardedLength(int64(len(tc.input))))
+			require.Equal(t, int64(-1), body.ForwardedLength(-1))
+
+			forwarded, err := io.ReadAll(body.StreamingReader())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, string(forwarded))
+		})
+	}
+}
+
+func TestBufferedBody_CloseReleasesBytesBeyondLimit(t *testing.T) {
+	source := &closeTracker{Reader: strings.NewReader("hello world")}
+	body := NewBufferedBody(source, 5)
+
+	_, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.False(t, source.closed)
+
+	require.NoError(t, body.Close())
+	require.True(t, source.closed)
+}
+
 func TestBufferedBodyFromBytes(t *testing.T) {
 	body := NewBufferedBodyFromBytes([]byte("pre-buffered"))
 
