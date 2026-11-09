@@ -1505,3 +1505,22 @@ func TestLazy_FailureCachedAcrossRequests(t *testing.T) {
 	require.Equal(t, 1, fr.fetchCalls["MISSING"])
 }
 
+func TestSecrets_BodySwapKeepsBytesBeyondLimit(t *testing.T) {
+	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
+		e.MatchHeaders = nil
+		e.MatchBody = true
+	})})
+
+	prefix := `{"api_key": "proxy-openai-abc123"`
+	tail := `, "model": "gpt-4"}`
+
+	req := openaiReq("POST", "/v1/chat")
+	req.Body = transform.NewBufferedBody(io.NopCloser(strings.NewReader(prefix+tail)), int64(len(prefix)))
+	req.ContentLength = int64(len(prefix + tail))
+
+	doTransform(t, s, req)
+
+	result, err := io.ReadAll(transform.RequireBufferedBody(req.Body).StreamingReader())
+	require.NoError(t, err)
+	require.Equal(t, `{"api_key": "sk-real-openai-key", "model": "gpt-4"}`, string(result))
+}

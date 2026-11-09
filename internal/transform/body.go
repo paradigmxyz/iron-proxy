@@ -15,12 +15,13 @@ import (
 // original reader directly — avoiding buffering for the final response write
 // or upstream send.
 //
-// A maxBytes of 0 means unlimited; when the limit is exceeded the body is
-// truncated silently.
+// A maxBytes of 0 means unlimited. When the limit is reached, transforms see
+// only the first maxBytes, and StreamingReader() forwards the rest.
 type BufferedBody struct {
 	once     sync.Once
 	mu       sync.Mutex // protects pos only
 	original io.ReadCloser
+	rest     io.ReadCloser // bytes beyond maxBytes, unread by transforms
 	data     []byte
 	pos      int
 	maxBytes int64
@@ -70,10 +71,32 @@ func (b *BufferedBody) buffer() error {
 			r = io.LimitReader(r, b.maxBytes)
 		}
 		b.data, err = io.ReadAll(r)
-		b.original.Close()
+		if err == nil && b.maxBytes > 0 && int64(len(b.data)) == b.maxBytes {
+			b.rest = b.original
+		} else {
+			b.original.Close()
+		}
 		b.original = nil
 	})
 	return err
+}
+
+// ReplaceBuffered replaces the bytes transforms can see and rewinds the body.
+// Bytes beyond maxBytes are kept and still forwarded after data.
+func (b *BufferedBody) ReplaceBuffered(data []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.data = data
+	b.pos = 0
+}
+
+// ForwardedLength returns the length StreamingReader will produce for a body
+// the client declared as declared bytes. Call it only when Len returns -1.
+func (b *BufferedBody) ForwardedLength(declared int64) int64 {
+	if b.rest == nil || declared < 0 {
+		return declared
+	}
+	return declared - b.maxBytes + int64(len(b.data))
 }
 
 // Reset rewinds the read position to the beginning so the body can be
@@ -87,7 +110,8 @@ func (b *BufferedBody) Reset() {
 // StreamingReader returns a reader for the final output (response write or
 // upstream send). If the body was never read by a transform, this returns the
 // original reader directly — no buffering occurs. If the body was buffered,
-// returns a reader over the buffer from the current position.
+// returns a reader over the buffer from the current position, followed by any
+// bytes beyond maxBytes.
 func (b *BufferedBody) StreamingReader() io.Reader {
 	if b.original != nil {
 		r := b.original
@@ -97,13 +121,17 @@ func (b *BufferedBody) StreamingReader() io.Reader {
 	b.mu.Lock()
 	pos := b.pos
 	b.mu.Unlock()
-	return bytes.NewReader(b.data[pos:])
+	buffered := bytes.NewReader(b.data[pos:])
+	if b.rest != nil {
+		return io.MultiReader(buffered, b.rest)
+	}
+	return buffered
 }
 
 // Len returns the total size of the buffered body, or -1 if the body has not
-// been buffered yet.
+// been buffered yet or bytes beyond maxBytes may remain.
 func (b *BufferedBody) Len() int {
-	if b.original != nil {
+	if b.original != nil || b.rest != nil {
 		return -1
 	}
 	return len(b.data)
@@ -114,6 +142,11 @@ func (b *BufferedBody) Close() error {
 	if b.original != nil {
 		err := b.original.Close()
 		b.original = nil
+		return err
+	}
+	if b.rest != nil {
+		err := b.rest.Close()
+		b.rest = nil
 		return err
 	}
 	return nil
