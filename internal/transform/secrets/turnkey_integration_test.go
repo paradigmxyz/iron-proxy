@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	turnkeycrypto "github.com/tkhq/go-sdk/crypto"
@@ -23,36 +24,44 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
-// Test-only trust override: production always uses the SDK's production Signer.
-type turnkeyTestSignerClient struct {
-	client turnkeyClient
-	signer *ecdsa.PublicKey
-}
-
-func (c turnkeyTestSignerClient) ExportSecret(ctx context.Context, org, secret string, _ ...*ecdsa.PublicKey) ([]byte, error) {
-	return c.client.ExportSecret(ctx, org, secret, c.signer)
-}
-
 func signedTurnkeyTestExport(t *testing.T, key *ecdsa.PrivateKey, target, org string, plaintext []byte, tamper bool) string {
 	t.Helper()
+	bundle, err := signTurnkeyTestExport(key, target, org, plaintext, tamper)
+	require.NoError(t, err)
+	return bundle
+}
+
+// signTurnkeyTestExport builds an export bundle signed by a test-only Signer key.
+func signTurnkeyTestExport(key *ecdsa.PrivateKey, target, org string, plaintext []byte, tamper bool) (string, error) {
 	public, err := hex.DecodeString(target)
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	kemPublic, err := turnkeycrypto.KemID.Scheme().UnmarshalBinaryPublicKey(public)
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	ciphertext, encapped, err := turnkeycrypto.HPKEEncrypt(&kemPublic, plaintext)
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	data, err := json.Marshal(turnkeycrypto.ServerSendData{EncappedPublic: encapped, Ciphertext: ciphertext, OrganizationID: org})
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	signature, err := turnkeycrypto.P256Sign(key, data)
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	if tamper {
 		signature[0] ^= 1
 	}
 	quorum, err := key.PublicKey.ECDH()
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	bundle, err := json.Marshal(turnkeycrypto.ServerTargetMsgV1{Version: "v1.0.0", Data: data, DataSignature: signature, EnclaveQuorumPublic: quorum.Bytes()})
-	require.NoError(t, err)
-	return string(bundle)
+	return string(bundle), err
 }
 
 // Covers the actual source and transform, SDK stamp/retry, Signer verification,
@@ -149,10 +158,10 @@ func TestTurnkeySourceSDKExportThroughTransform(t *testing.T) {
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))
 			cache := &turnkeyClientCache{newClient: func(org, env string) (turnkeyClient, error) {
-				client, err := newTurnkeySDKClient(org, env, server.Client().Transport, turnkey.WithBaseURL(server.URL))
-				return turnkeyTestSignerClient{client: client, signer: &signer.PublicKey}, err
+				return newTurnkeySDKClient(org, env, server.Client().Transport, turnkey.WithBaseURL(server.URL))
 			}}
-			builder := &turnkeyBuilder{clientFor: cache.get, logger: logger}
+			// Test-only trust override: production always uses the SDK's production Signer.
+			builder := &turnkeyBuilder{clientFor: cache.get, logger: logger, signerKey: &signer.PublicKey}
 			var config secretsConfig
 			node := yamlNode(t, map[string]any{"secrets": []any{map[string]any{
 				"source":  map[string]any{"type": "turnkey", "organization_id": org, "secret_id": secret, "api_private_key_env": "TEST_TURNKEY_INTEGRATION_KEY", "json_key": "api_key"},
@@ -181,4 +190,75 @@ func TestTurnkeySourceSDKExportThroughTransform(t *testing.T) {
 			require.NotContains(t, logs.String(), "sensitive-backend-detail")
 		})
 	}
+}
+
+// Covers the approval path with the real SDK: one export activity, then reads
+// of that activity until it completes, decrypted with the original recipient key.
+func TestTurnkeySourceResumesApprovedExport(t *testing.T) {
+	const org = "11111111-1111-4111-8111-111111111111"
+	const secret = "22222222-2222-4222-8222-222222222222"
+	const activityID = "33333333-3333-4333-8333-333333333333"
+	t.Setenv("TEST_TURNKEY_INTEGRATION_KEY", strings.Repeat("0", 63)+"1")
+	signer, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	var exports, reads atomic.Int32
+	var approved atomic.Bool
+	var target string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		activity := map[string]any{"id": activityID, "status": turnkey.ActivityStatusConsensusNeeded}
+		switch r.URL.Path {
+		case "/public/v1/submit/export_secrets":
+			exports.Add(1)
+			var request struct {
+				Parameters turnkey.ExportSecretsIntent `json:"parameters"`
+			}
+			require.NoError(t, json.Unmarshal(body, &request))
+			target = request.Parameters.Secrets[0].TargetPublicKey
+		case "/public/v1/query/get_activity":
+			reads.Add(1)
+			var request turnkey.GetActivityRequest
+			require.NoError(t, json.Unmarshal(body, &request))
+			require.Equal(t, activityID, request.ActivityID)
+			require.Equal(t, org, request.OrganizationID)
+			if approved.Load() {
+				activity["status"] = turnkey.ActivityStatusCompleted
+				activity["result"] = map[string]any{"exportSecretsResult": turnkey.ExportSecretsResult{
+					SecretPayloads: []string{signedTurnkeyTestExport(t, signer, target, org, []byte("synthetic-approved-credential"), false)},
+				}}
+			}
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"activity": activity}))
+	}))
+	defer server.Close()
+	var logs bytes.Buffer
+	builder := &turnkeyBuilder{
+		logger:    slog.New(slog.NewJSONHandler(&logs, nil)),
+		signerKey: &signer.PublicKey,
+		clientFor: func(org, env string) (turnkeyClient, error) {
+			return newTurnkeySDKClient(org, env, server.Client().Transport, turnkey.WithBaseURL(server.URL))
+		},
+	}
+	source, err := builder.Build(yamlNode(t, map[string]string{
+		"organization_id": org, "secret_id": secret, "api_private_key_env": "TEST_TURNKEY_INTEGRATION_KEY",
+	}))
+	require.NoError(t, err)
+	now := time.Now()
+	source.(*cachedValue).now = func() time.Time { return now }
+	for range 3 {
+		_, err := source.Get(context.Background())
+		require.EqualError(t, err, "turnkey secret export failed (approval_required, activity "+activityID+")")
+		now = now.Add(2 * time.Minute)
+	}
+	require.Equal(t, int32(1), exports.Load(), "retries must not submit new exports")
+	require.Equal(t, int32(2), reads.Load())
+	approved.Store(true)
+	value, err := source.Get(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "synthetic-approved-credential", value)
+	require.Equal(t, int32(1), exports.Load())
+	require.NotContains(t, logs.String(), "synthetic-approved-credential")
 }

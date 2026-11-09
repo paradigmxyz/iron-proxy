@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -21,12 +23,39 @@ import (
 	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
+// turnkeyFakeSigner signs fake export bundles. Builders in tests trust it
+// through signerKey, so fakes still go through real decryption.
+var turnkeyFakeSigner = func() *ecdsa.PrivateKey {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return key
+}()
+
 type fakeTurnkeyClient struct {
-	export func(context.Context, string, string) ([]byte, error)
+	export   func(context.Context, string, string) ([]byte, error)
+	activity func(context.Context, string) (*turnkey.ActivityResponse, error)
 }
 
-func (c fakeTurnkeyClient) ExportSecret(ctx context.Context, org, secret string, signerKey ...*ecdsa.PublicKey) ([]byte, error) {
-	return c.export(ctx, org, secret)
+func (c fakeTurnkeyClient) ExportSecrets(ctx context.Context, input turnkey.ExportSecretsRequest) (*turnkey.ExportSecretsResponse, error) {
+	param := input.Secrets[0]
+	plaintext, err := c.export(ctx, input.OrganizationID, param.SecretID)
+	if err != nil {
+		return nil, err
+	}
+	bundle, err := signTurnkeyTestExport(turnkeyFakeSigner, param.TargetPublicKey, input.OrganizationID, plaintext, false)
+	if err != nil {
+		return nil, err
+	}
+	return &turnkey.ExportSecretsResponse{ExportSecretsResult: turnkey.ExportSecretsResult{SecretPayloads: []string{bundle}}}, nil
+}
+
+func (c fakeTurnkeyClient) GetActivity(ctx context.Context, input turnkey.GetActivityRequest) (*turnkey.ActivityResponse, error) {
+	if c.activity == nil {
+		return nil, errors.New("unexpected activity read")
+	}
+	return c.activity(ctx, input.ActivityID)
 }
 
 func TestTurnkeyBuilderLazyExport(t *testing.T) {
@@ -35,7 +64,7 @@ func TestTurnkeyBuilderLazyExport(t *testing.T) {
 			clientCalls, exportCalls := 0, 0
 			plaintext := []byte("test-only-upstream-credential")
 			var logs bytes.Buffer
-			builder := &turnkeyBuilder{
+			builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey,
 				logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 				clientFor: func(org, env string) (turnkeyClient, error) {
 					clientCalls++
@@ -68,7 +97,6 @@ func TestTurnkeyBuilderLazyExport(t *testing.T) {
 			}
 			require.Equal(t, 1, clientCalls)
 			require.Equal(t, 1, exportCalls)
-			require.Equal(t, make([]byte, len(plaintext)), plaintext)
 			require.NotContains(t, logs.String(), "test-only-upstream-credential")
 		})
 	}
@@ -87,7 +115,7 @@ func TestTurnkeyBuilderValidationDoesNotFetch(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			builder := &turnkeyBuilder{
+			builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey,
 				logger: slog.Default(),
 				clientFor: func(string, string) (turnkeyClient, error) {
 					t.Fatal("validation must not create a client")
@@ -115,7 +143,7 @@ func TestTurnkeyBuilderFailuresDoNotExposeSecrets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			builder := &turnkeyBuilder{
+			builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey,
 				logger: slog.New(slog.NewJSONHandler(&logs, nil)),
 				clientFor: func(string, string) (turnkeyClient, error) {
 					return fakeTurnkeyClient{export: func(context.Context, string, string) ([]byte, error) {
@@ -130,9 +158,6 @@ func TestTurnkeyBuilderFailuresDoNotExposeSecrets(t *testing.T) {
 			require.Empty(t, value)
 			require.NotContains(t, err.Error(), "sensitive-backend-detail")
 			require.NotContains(t, logs.String(), "sensitive-backend-detail")
-			if tc.plaintext != nil {
-				require.Equal(t, make([]byte, len(tc.plaintext)), tc.plaintext)
-			}
 		})
 	}
 }
@@ -208,15 +233,22 @@ type trackedTurnkeyBody struct {
 func (b *trackedTurnkeyBody) Close() error { b.closed = true; return nil }
 
 func TestTurnkeyApprovalFailureAfterSuccessServesStale(t *testing.T) {
-	calls := 0
-	builder := &turnkeyBuilder{logger: slog.Default(), clientFor: func(string, string) (turnkeyClient, error) {
-		return fakeTurnkeyClient{export: func(context.Context, string, string) ([]byte, error) {
-			calls++
-			if calls == 1 {
-				return []byte("synthetic-cached-secret"), nil
-			}
-			return nil, &turnkey.ActivityRequiresApprovalError{ActivityID: "test-activity"}
-		}}, nil
+	exports, reads := 0, 0
+	builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey, logger: slog.Default(), clientFor: func(string, string) (turnkeyClient, error) {
+		return fakeTurnkeyClient{
+			export: func(context.Context, string, string) ([]byte, error) {
+				exports++
+				if exports == 1 {
+					return []byte("synthetic-cached-secret"), nil
+				}
+				return nil, &turnkey.ActivityRequiresApprovalError{ActivityID: "test-activity"}
+			},
+			activity: func(_ context.Context, id string) (*turnkey.ActivityResponse, error) {
+				reads++
+				require.Equal(t, "test-activity", id)
+				return &turnkey.ActivityResponse{Activity: turnkey.Activity{ID: id, Status: turnkey.ActivityStatusConsensusNeeded}}, nil
+			},
+		}, nil
 	}}
 	source, err := builder.Build(yamlNode(t, map[string]string{"organization_id": "test-org", "secret_id": "test-secret", "ttl": "1m", "failure_ttl": "2s"}))
 	require.NoError(t, err)
@@ -229,7 +261,55 @@ func TestTurnkeyApprovalFailureAfterSuccessServesStale(t *testing.T) {
 		require.Equal(t, "synthetic-cached-secret", value)
 		now = now.Add(time.Minute)
 	}
-	require.Equal(t, 4, calls)
+	// One success, one export that needs approval, then reads of that activity.
+	require.Equal(t, 2, exports)
+	require.Equal(t, 2, reads)
+}
+
+func TestTurnkeyPendingExportOutcomes(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     turnkey.ActivityStatus
+		readErr    error
+		wantErr    string
+		wantExport int
+	}{
+		{name: "still pending", status: turnkey.ActivityStatusConsensusNeeded, wantErr: "turnkey secret export failed (approval_required, activity 0000-abcd)", wantExport: 1},
+		{name: "rejected", status: turnkey.ActivityStatusRejected, wantErr: "turnkey secret export failed (activity_failed)", wantExport: 2},
+		{name: "not found", readErr: &turnkey.RequestError{StatusCode: 404}, wantErr: "turnkey secret export failed (not_found)", wantExport: 2},
+		{name: "transient read failure", readErr: &turnkey.RequestError{StatusCode: 503}, wantErr: "turnkey secret export failed (service_unavailable)", wantExport: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			exports := 0
+			client := fakeTurnkeyClient{
+				export: func(context.Context, string, string) ([]byte, error) {
+					exports++
+					return nil, &turnkey.ActivityRequiresApprovalError{ActivityID: "0000-abcd"}
+				},
+				activity: func(_ context.Context, id string) (*turnkey.ActivityResponse, error) {
+					if tc.readErr != nil {
+						return nil, tc.readErr
+					}
+					return &turnkey.ActivityResponse{Activity: turnkey.Activity{ID: id, Status: tc.status}}, nil
+				},
+			}
+			builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey, logger: slog.Default(), clientFor: func(string, string) (turnkeyClient, error) { return client, nil }}
+			source, err := builder.Build(yamlNode(t, map[string]string{"organization_id": "test-org", "secret_id": "test-secret"}))
+			require.NoError(t, err)
+			now := time.Now()
+			source.(*cachedValue).now = func() time.Time { return now }
+			_, err = source.Get(context.Background())
+			require.EqualError(t, err, "turnkey secret export failed (approval_required, activity 0000-abcd)")
+			now = now.Add(2 * time.Minute)
+			_, err = source.Get(context.Background())
+			require.EqualError(t, err, tc.wantErr)
+			now = now.Add(2 * time.Minute)
+			_, err = source.Get(context.Background())
+			require.Error(t, err)
+			require.Equal(t, tc.wantExport, exports)
+		})
+	}
 }
 
 func TestTurnkeyTransportFailureDoesNotLogDetails(t *testing.T) {
@@ -247,7 +327,7 @@ func TestTurnkeyTransportFailureDoesNotLogDetails(t *testing.T) {
 		return nil, errors.New("sensitive-transport-detail")
 	})
 	t.Setenv("TEST_TURNKEY_KEY", strings.Repeat("0", 63)+"1")
-	builder := &turnkeyBuilder{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clientFor: func(org, env string) (turnkeyClient, error) { return newTurnkeySDKClient(org, env, transport) }}
+	builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clientFor: func(org, env string) (turnkeyClient, error) { return newTurnkeySDKClient(org, env, transport) }}
 	source, err := builder.Build(yamlNode(t, map[string]string{
 		"organization_id": "test-org", "secret_id": "test-secret", "api_private_key_env": "TEST_TURNKEY_KEY",
 	}))

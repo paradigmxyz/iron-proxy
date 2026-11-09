@@ -68,6 +68,7 @@ func TestTurnkeyExportErrorCategories(t *testing.T) {
 		err      error
 		category string
 	}{
+		// detail does not have the form of an activity ID, so it is not included.
 		{"approval", &turnkey.ActivityRequiresApprovalError{ActivityID: detail}, "approval_required"},
 		{"activity", &turnkey.ActivityFailedError{ActivityID: detail, Failure: &turnkey.RPCStatus{Message: &detail}}, "activity_failed"},
 		{"deadline", context.DeadlineExceeded, "timeout"},
@@ -85,6 +86,8 @@ func TestTurnkeyExportErrorCategories(t *testing.T) {
 			category string
 		}{fmt.Sprint(tc.status), &turnkey.RequestError{StatusCode: tc.status, Body: []byte(detail), Status: &turnkey.RPCStatus{Message: &detail}}, tc.category})
 	}
+	err := sanitizeTurnkeyError(fmt.Errorf("%s: %w", detail, &turnkey.ActivityRequiresApprovalError{ActivityID: "33333333-3333-4333-8333-333333333333"}))
+	require.EqualError(t, err, "turnkey secret export failed (approval_required, activity 33333333-3333-4333-8333-333333333333)")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			err := sanitizeTurnkeyError(fmt.Errorf("%s: %w", detail, tc.err))
@@ -173,7 +176,7 @@ func TestTurnkeyBuilderReusesClientAcrossSourcesAndRefreshes(t *testing.T) {
 		clients++
 		return &fakeTurnkeyClient{export: func(context.Context, string, string) ([]byte, error) { exports++; return []byte("synthetic"), nil }}, nil
 	}}
-	builder := &turnkeyBuilder{clientFor: cache.get, logger: slog.Default()}
+	builder := &turnkeyBuilder{signerKey: &turnkeyFakeSigner.PublicKey, clientFor: cache.get, logger: slog.Default()}
 	now := time.Now()
 	for _, id := range []string{"one", "two"} {
 		source, err := builder.Build(yamlNode(t, map[string]string{"organization_id": "org", "secret_id": id, "ttl": "1m"}))
@@ -190,13 +193,21 @@ func TestTurnkeyBuilderReusesClientAcrossSourcesAndRefreshes(t *testing.T) {
 	require.Equal(t, 4, exports)
 }
 
-func TestTurnkeyConfigurationRejectsNonStringFields(t *testing.T) {
+func TestTurnkeyConfigurationRejectsNonScalarFields(t *testing.T) {
 	for _, field := range []string{"organization_id", "secret_id", "api_private_key_env", "ttl", "failure_ttl"} {
 		t.Run(field, func(t *testing.T) {
 			cfg := map[string]any{"organization_id": "org", "secret_id": "secret"}
 			cfg[field] = []string{"sensitive-value"}
 			_, err := newTurnkeyBuilder(slog.Default()).Build(yamlNode(t, cfg))
-			require.EqualError(t, err, "turnkey source "+field+" must be a string")
+			require.EqualError(t, err, "invalid turnkey source configuration")
 		})
 	}
+}
+
+// Other sources accept plain YAML integers such as ttl: 0. Turnkey matches them.
+func TestTurnkeyConfigurationAcceptsIntegerTTL(t *testing.T) {
+	_, err := newTurnkeyBuilder(slog.Default()).Build(yamlNode(t, map[string]any{
+		"organization_id": "org", "secret_id": "secret", "ttl": 0, "failure_ttl": 0,
+	}))
+	require.NoError(t, err)
 }
