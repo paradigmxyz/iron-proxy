@@ -85,3 +85,40 @@ go test -race ./internal/transform/secrets -run '^TestTurnkeySourceSDKExportThro
 
 This uses signed synthetic exports from a local server and a test-only Signer key.
 Production source configuration cannot override the API endpoint or Signer key.
+
+For an opt-in test against the real Turnkey API, use a non-root identity scoped
+to a disposable secret containing a JSON object with an `api_key` string. Set
+`TURNKEY_API_PRIVATE_KEY` in the test process environment and provide:
+
+- `TURNKEY_INTEGRATION_ORGANIZATION_ID`: the secret's organization.
+- `TURNKEY_INTEGRATION_SECRET_ID`: the disposable secret's ID.
+- `TURNKEY_INTEGRATION_EXPECTED_FILE`: a local file containing the exact
+  `api_key` bytes, without a trailing newline. Keep this file private.
+
+```sh
+go build -o iron-proxy ./cmd/iron-proxy
+./iron-proxy generate-ca -outdir tmp
+go test -race ./integration_test -integration -run '^TestTurnkeyManagedSecret$' -count=1
+```
+
+The test starts the built CLI and a loopback HTTP verifier. The verifier returns
+only an authentication result; it does not echo the credential. The test covers
+live export/decryption, JSON extraction, credential replacement, and rejection
+of missing or alternative placeholders. It skips when the inputs are absent.
+This test does not establish TLS transport behavior.
+
+### Proxy transport limits
+
+The source inherits the proxy's shared request matching behavior. Rules select
+where to inject a credential; unmatched requests still follow the rest of the
+proxy pipeline. Matching a host does not require TLS: a matching plaintext HTTP
+request can receive the credential. A deployment that needs encrypted transport
+must enforce that requirement separately.
+Upstream [#306](https://github.com/paradigmxyz/iron-proxy/pull/306)
+proposes TLS-only matching for credential injectors.
+
+In the current proxy, a host-only `require: true` rule also rejects the synthetic
+CONNECT preflight before the inner HTTPS request can present its placeholder.
+Scope the secret rule to the intended HTTP methods and paths when using the
+CONNECT listener. Upstream [#302](https://github.com/paradigmxyz/iron-proxy/pull/302)
+addresses the shared preflight behavior.

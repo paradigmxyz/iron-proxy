@@ -129,7 +129,7 @@ func (e *turnkeyExport) fetch(ctx context.Context) ([]byte, error) {
 		// lazy-source logs and proxy responses.
 		return nil, sanitizeTurnkeyError(err)
 	}
-	return e.decrypt(res.ExportSecretsResult.SecretPayloads, kemPrivate)
+	return e.decrypt(res.SecretPayloads, kemPrivate)
 }
 
 // resume reads the pending export activity. It does not submit a new export.
