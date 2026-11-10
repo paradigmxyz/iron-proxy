@@ -5,7 +5,8 @@ injection, replacement, TTL caching, and JSON extraction.
 
 ## Turnkey Managed Secrets
 
-Use `type: turnkey` with `organization_id` and
+[Turnkey Managed Secrets](https://docs.turnkey.com/features/secrets) stores secrets and exports them, encrypted end to
+end, when a policy allows it. Use `type: turnkey` with `organization_id` and
 `secret_id`. The proxy reads its API private key from `TURNKEY_API_PRIVATE_KEY`,
 or the environment variable named by `api_private_key_env`. Give that API identity
 a policy scoped to exporting the intended secret. The SDK verifies the Signer
@@ -49,12 +50,11 @@ or immediate-revocation boundary.
 
 ### Client lifecycle and requests
 
-Within one secrets transform configuration, clients are reused across secrets with
-the same organization and API-key environment variable name. Each call to
-`secrets.BuildSource` (used by other components to resolve a single source) creates
-its own client. A successful initialization captures the signing key until config
-reload or process restart; changing that environment variable does not rotate an
-already cached client. Failed initialization is retried after the source's failure
+One client is shared by all Turnkey sources in the process with the same
+organization and API-key environment variable name, including sources from other
+transforms and config reloads. A successful initialization captures the signing
+key until the process restarts. A config reload does not rotate an already
+cached client. Failed initialization is retried after the source's failure
 cache expires.
 
 Each fetch has a 30-second overall deadline and an 8-second HTTP timeout, so all

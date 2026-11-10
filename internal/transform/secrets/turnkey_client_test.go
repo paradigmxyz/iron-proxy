@@ -211,3 +211,24 @@ func TestTurnkeyConfigurationAcceptsIntegerTTL(t *testing.T) {
 	}))
 	require.NoError(t, err)
 }
+
+func TestTurnkeySourcesShareOneClientAcrossRegistries(t *testing.T) {
+	// Separate transforms and config reloads each build their own registry.
+	// They must still share one client per organization and key env.
+	var calls atomic.Int32
+	saved := turnkeyClients
+	turnkeyClients = &turnkeyClientCache{newClient: func(string, string) (turnkeyClient, error) {
+		calls.Add(1)
+		return fakeTurnkeyClient{export: func(context.Context, string, string) ([]byte, error) { return []byte("synthetic"), nil }}, nil
+	}}
+	t.Cleanup(func() { turnkeyClients = saved })
+	for _, id := range []string{"one", "two", "three"} {
+		src, err := BuildSource(yamlNode(t, map[string]string{"type": "turnkey", "organization_id": "org", "secret_id": id}), slog.Default())
+		require.NoError(t, err)
+		// BuildSource trusts only the production Signer, so the fake bundle
+		// fails decryption. The client is still created before that step.
+		_, err = src.Get(context.Background())
+		require.Error(t, err)
+	}
+	require.Equal(t, int32(1), calls.Load())
+}

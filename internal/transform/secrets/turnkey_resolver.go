@@ -47,9 +47,14 @@ type turnkeyConfig struct {
 	FailureTTL       string `yaml:"failure_ttl,omitempty"`
 }
 
+// turnkeyClients is shared by every Turnkey source in the process, like
+// opClients. Each secrets transform, credential source, and config reload
+// builds its own registry; all of them reuse one client per organization and
+// API-key environment variable name.
+var turnkeyClients = &turnkeyClientCache{newClient: newTurnkeyClient}
+
 func newTurnkeyBuilder(logger *slog.Logger) *turnkeyBuilder {
-	cache := &turnkeyClientCache{newClient: newTurnkeyClient}
-	return &turnkeyBuilder{clientFor: cache.get, logger: logger}
+	return &turnkeyBuilder{clientFor: turnkeyClients.get, logger: logger}
 }
 
 func (b *turnkeyBuilder) Build(raw yaml.Node) (secretSource, error) {
@@ -239,7 +244,8 @@ func (t turnkeyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
-// Clients contain immutable signing configuration and are shared across sources.
+// Clients contain immutable signing configuration and are shared across sources
+// and registries.
 // Failed initialization is not cached, allowing a corrected environment to recover.
 type turnkeyClientCache struct {
 	mu        sync.Mutex
