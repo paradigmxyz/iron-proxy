@@ -30,19 +30,17 @@ type Rule struct {
 }
 
 // MatchesRequest returns true if req matches this rule, including the
-// require_tls condition. Prefer it over Matches whenever the request is at
-// hand.
+// require_tls condition.
 func (r *Rule) MatchesRequest(req *http.Request) bool {
 	if r.RequireTLS && req.TLS == nil {
 		return false
 	}
-	return r.Matches(StripPort(req.Host), req.Method, req.URL.Path)
+	return r.matches(StripPort(req.Host), req.Method, req.URL.Path)
 }
 
-// Matches returns true if host, method and path match this rule. It cannot
-// see the connection, so it does not apply require_tls: use MatchesRequest
-// for real requests.
-func (r *Rule) Matches(host, method, path string) bool {
+// matches returns true if host, method and path match this rule. It does not
+// apply require_tls.
+func (r *Rule) matches(host, method, path string) bool {
 	if !r.Matcher.Matches(host) {
 		return false
 	}
