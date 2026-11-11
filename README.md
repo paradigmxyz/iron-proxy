@@ -772,6 +772,33 @@ iron-proxy generates leaf certificates on the fly, signed by the CA you provide.
 The client container must trust this CA (add it to the system trust store or pass
 it via `--cacert`). Certs are cached in an LRU cache keyed by SNI hostname.
 
+#### Passing selected hosts through (`tls.passthrough_hosts`)
+
+Some clients (for example rustls with built-in roots) ignore the system trust
+store and reject the minted leaf certificates. In `mitm` mode, list such hosts
+under `tls.passthrough_hosts` (exact names or globs like `*.example.com`, which
+also matches `example.com`) to
+pass their TLS through unopened, exactly like `tls.mode: "sni-only"`, while all
+other hosts stay MITM'd:
+
+```yaml
+tls:
+  mode: "mitm"
+  ca_cert: "/certs/ca.crt"
+  ca_key: "/certs/ca.key"
+  passthrough_hosts:
+    - "api.example.com"
+```
+
+- Only valid with `tls.mode: "mitm"` (it is redundant and rejected in `sni-only`).
+- Applies to the CONNECT and SOCKS5 tunnel only, not to the HTTPS listener.
+- The allowlist still runs, but transforms only see the host (method, path,
+  headers, and body are empty). Rules that match methods or paths and secret
+  substitution do not apply to these hosts.
+- The SNI in the ClientHello must also be listed. A tunnel to a listed host that
+  names any other host in its SNI is rejected with 403.
+- The upstream port is always 443, regardless of the CONNECT port.
+
 ## Routing traffic to the proxy
 
 There are three approaches, with increasing enforcement.
