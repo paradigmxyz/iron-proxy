@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	_ "github.com/ironsh/iron-proxy/internal/transform/allowlist"
 )
 
 func startTunnelProxy(t *testing.T, transforms []transform.Transformer) (*Proxy, string, *x509.CertPool) {
@@ -915,4 +917,85 @@ func TestServeOneHTTPConn_HijackWaitsForHandler(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("serveOneHTTPConn did not return after the hijacking handler finished")
 	}
+}
+
+// allowlistFromYAML builds the allowlist transform from its YAML config, the
+// same way the proxy does at startup.
+func allowlistFromYAML(t *testing.T, cfg string) transform.Transformer {
+	t.Helper()
+	var node yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(cfg), &node))
+	factory, err := transform.Lookup("allowlist")
+	require.NoError(t, err)
+	tr, err := factory(*node.Content[0], testLogger())
+	require.NoError(t, err)
+	return tr
+}
+
+// Rules with methods or paths must not block the tunnel itself. The CONNECT
+// preflight matches on host only, the requests inside the MITM tunnel are
+// still checked against methods and paths.
+func TestTunnel_CONNECT_MITM_AllowlistMethodAndPathRules(t *testing.T) {
+	const host = "mitm.example.com"
+	al := allowlistFromYAML(t, `
+rules:
+  - host: "mitm.example.com"
+    methods: ["GET"]
+    paths: ["/allowed"]
+`)
+	conn, br := dialMITMTunnel(t, []transform.Transformer{al}, host)
+
+	cases := []struct {
+		name, method, target string
+		want                 int
+	}{
+		{"allowed method and path", http.MethodGet, "/allowed", http.StatusOK},
+		{"wrong path", http.MethodGet, "/other", http.StatusForbidden},
+		{"wrong method", http.MethodPost, "/allowed", http.StatusForbidden},
+		{"CONNECT inside the tunnel", http.MethodConnect, host + ":443", http.StatusForbidden},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, tunnelRequestStatus(t, conn, br, tc.method, tc.target, host))
+		})
+	}
+}
+
+// dialMITMTunnel starts a proxy with the given transforms whose upstream is a
+// local TLS server, opens a CONNECT tunnel to host:443 and completes the TLS
+// handshake against the proxy CA.
+func dialMITMTunnel(t *testing.T, transforms []transform.Transformer, host string) (*tls.Conn, *bufio.Reader) {
+	t.Helper()
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(upstream.Close)
+
+	p, tunnelAddr, caPool := startTunnelProxy(t, transforms)
+	p.transport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, upstream.Listener.Addr().String())
+		},
+	}
+
+	conn, _ := dialCONNECT(t, tunnelAddr, host+":443")
+	tlsConn := tls.Client(conn, &tls.Config{RootCAs: caPool, ServerName: host})
+	t.Cleanup(func() { _ = tlsConn.Close() })
+	require.NoError(t, tlsConn.Handshake())
+	return tlsConn, bufio.NewReader(tlsConn)
+}
+
+// tunnelRequestStatus writes a raw request into the tunnel and returns the
+// response status. The request-target is written as-is.
+func tunnelRequestStatus(t *testing.T, conn *tls.Conn, br *bufio.Reader, method, target, host string) int {
+	t.Helper()
+	_, err := fmt.Fprintf(conn, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 0\r\n\r\n", method, target, host)
+	require.NoError(t, err)
+	resp, err := http.ReadResponse(br, nil)
+	require.NoError(t, err)
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	return resp.StatusCode
 }

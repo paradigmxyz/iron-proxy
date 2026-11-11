@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -420,4 +421,56 @@ func TestMatchPath(t *testing.T) {
 			require.Equal(t, tt.want, hostmatch.MatchPath(tt.pattern, tt.path))
 		})
 	}
+}
+
+// --- Tunnel preflight ---
+
+// preflightResult runs the synthetic CONNECT request that the proxy builds in
+// tunnelTransformCheck before a tunnel is established.
+func preflightResult(t *testing.T, a *Allowlist, target string) *transform.TransformResult {
+	t.Helper()
+	req := &http.Request{Method: http.MethodConnect, Host: target, URL: &url.URL{Host: target}}
+	res, err := a.TransformRequest(context.Background(), &transform.TransformContext{TunnelPreflight: true}, req)
+	require.NoError(t, err)
+	return res
+}
+
+func TestAllowlist_TunnelPreflightMatchesHostOnly(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Rules: []hostmatch.RuleConfig{
+			{Host: "api.openai.com", Methods: []string{"POST"}, Paths: []string{"/v1/*"}},
+			{CIDR: "10.0.0.0/8", Methods: []string{"GET"}},
+		},
+	})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name   string
+		target string
+		want   transform.TransformAction
+	}{
+		{"host rule with methods and paths", "api.openai.com:443", transform.ActionContinue},
+		{"cidr rule with methods", "10.1.2.3:443", transform.ActionContinue},
+		{"unlisted host", "evil.com:443", transform.ActionReject},
+		{"unlisted ip", "192.168.1.1:443", transform.ActionReject},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, preflightResult(t, a, tc.target).Action)
+		})
+	}
+}
+
+func TestAllowlist_ConnectOutsidePreflightKeepsMethodRules(t *testing.T) {
+	a, err := newFromConfig(allowlistConfig{
+		Rules: []hostmatch.RuleConfig{{Host: "api.openai.com", Methods: []string{"GET"}}},
+	})
+	require.NoError(t, err)
+
+	// A real CONNECT request (e.g. sent inside an established tunnel) is not
+	// the preflight and must still match the method restriction.
+	req := &http.Request{Method: http.MethodConnect, Host: "api.openai.com:443", URL: &url.URL{Host: "api.openai.com:443"}}
+	res, err := a.TransformRequest(context.Background(), &transform.TransformContext{}, req)
+	require.NoError(t, err)
+	require.Equal(t, transform.ActionReject, res.Action)
 }
