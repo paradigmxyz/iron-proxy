@@ -496,14 +496,20 @@ HTTPS). A plain-HTTP request then keeps its proxy token:
 
 `require_tls` defaults to `false`. It is accepted only by the credential
 injectors, where a rule not matching means no credential is added: `secrets`,
-`aws_auth`, `gcp_auth`, `gcp_id_token`, `oauth_token`, `hmac_sign`, and MCP
-gateway routes.
+`aws_auth`, `gcp_auth`, `gcp_id_token`, `oauth_token`, and `hmac_sign`.
+`gcp_auth` with no `rules` applies to every request, so it has no rule to set
+`require_tls` on.
+
+`require_tls` does not combine with `require: true`. A plain-HTTP request does
+not match the rule, so `require` does not apply to it either: the request is
+forwarded even without the proxy token.
 
 Everywhere else it is a config error. On a rule that enforces a policy
 (`judge`, `header_allowlist`, `grpc`, `body_capture`, `annotate`, MCP policy),
 plain-HTTP requests would stop matching and skip the policy. On `allowlist`,
 the tunnel's `CONNECT` preflight is not TLS either, so the host would become
-unreachable through the tunnel listener.
+unreachable through the tunnel listener. On MCP gateway routes, a request that
+does not match is sent to its original host instead of the route upstream.
 
 Secret sources:
 
