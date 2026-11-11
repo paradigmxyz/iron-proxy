@@ -154,7 +154,7 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 		creds = &staticSourceProvider{accessKey: accessKey, secretKey: secretKey}
 	}
 
-	rules, err := hostmatch.CompileRules(c.Rules, "aws_auth")
+	rules, err := hostmatch.CompileRulesAllowRequireTLS(c.Rules, "aws_auth")
 	if err != nil {
 		return nil, err
 	}

@@ -188,6 +188,17 @@ var: MCP_TOKEN
 			}}},
 			wantErr: "inject cannot specify both header and query_param",
 		},
+		{
+			// A route rule that stops matching would send the request to r.Host
+			// instead of the route upstream.
+			name: "require_tls on a route rule",
+			cfg: Config{Routes: []RouteConfig{{
+				Name:     "github",
+				Rules:    []hostmatch.RuleConfig{{Host: "github.mcp.local", RequireTLS: true}},
+				Upstream: "https://example.com",
+			}}},
+			wantErr: "require_tls is not supported here",
+		},
 	}
 
 	for _, tc := range cases {

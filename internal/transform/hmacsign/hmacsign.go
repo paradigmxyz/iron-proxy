@@ -166,7 +166,7 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder) (*HMACSig
 		creds[name] = src
 	}
 
-	rules, err := hostmatch.CompileRules(c.Rules, "hmac_sign")
+	rules, err := hostmatch.CompileRulesAllowRequireTLS(c.Rules, "hmac_sign")
 	if err != nil {
 		return nil, err
 	}
