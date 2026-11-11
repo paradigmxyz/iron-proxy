@@ -49,27 +49,9 @@ var echoAuthHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Reque
 func startRequireTLSProxy(t *testing.T, requireTLS bool, tlsAddr, plainAddr string) (tunnelAddr string, caPool *x509.CertPool) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	t.Setenv(requireTLSEnvVar, requireTLSRealSecret)
-
 	al, err := allowlist.New([]string{requireTLSHost}, nil)
 	require.NoError(t, err)
-
-	secretsYAML := fmt.Sprintf(`
-secrets:
-  - source: {type: env, var: %s}
-    replace:
-      proxy_value: %s
-      match_headers: [Authorization]
-    rules:
-      - host: %s
-        require_tls: %t
-`, requireTLSEnvVar, requireTLSPlaceholder, requireTLSHost, requireTLS)
-	var doc yaml.Node
-	require.NoError(t, yaml.Unmarshal([]byte(secretsYAML), &doc))
-	factory, err := transform.Lookup("secrets")
-	require.NoError(t, err)
-	secretsTransform, err := factory(*doc.Content[0], logger)
-	require.NoError(t, err)
+	secretsTransform := newRequireTLSSecrets(t, requireTLSHost, requireTLS)
 
 	pipeline := transform.NewPipeline([]transform.Transformer{al, secretsTransform}, transform.BodyLimits{}, logger)
 	ca := newIntegrationCA(t)
@@ -109,6 +91,30 @@ secrets:
 		close(p.tunnelDone)
 	})
 	return ln.Addr().String(), ca.caPool
+}
+
+// newRequireTLSSecrets builds a secrets transform that swaps the placeholder
+// for the real secret on host, with the rule's require_tls set as given.
+func newRequireTLSSecrets(t *testing.T, host string, requireTLS bool) transform.Transformer {
+	t.Helper()
+	t.Setenv(requireTLSEnvVar, requireTLSRealSecret)
+	secretsYAML := fmt.Sprintf(`
+secrets:
+  - source: {type: env, var: %s}
+    replace:
+      proxy_value: %s
+      match_headers: [Authorization]
+    rules:
+      - host: %s
+        require_tls: %t
+`, requireTLSEnvVar, requireTLSPlaceholder, host, requireTLS)
+	var doc yaml.Node
+	require.NoError(t, yaml.Unmarshal([]byte(secretsYAML), &doc))
+	factory, err := transform.Lookup("secrets")
+	require.NoError(t, err)
+	secretsTransform, err := factory(*doc.Content[0], testLogger())
+	require.NoError(t, err)
+	return secretsTransform
 }
 
 // sendViaCONNECT opens a CONNECT tunnel to host:port, optionally starts TLS
@@ -207,6 +213,7 @@ func TestIntegration_RequireTLS_SecretsInjectOnlyInsideTLS(t *testing.T) {
 		{name: "require_tls: plain http via CONNECT keeps the placeholder", requireTLS: true, send: httpViaCONNECT, want: requireTLSPlaceholder},
 		{name: "require_tls: absolute-form http keeps the placeholder", requireTLS: true, send: absoluteForm, want: requireTLSPlaceholder},
 		{name: "control, off: https via CONNECT gets the real secret", requireTLS: false, send: httpsViaCONNECT, want: requireTLSRealSecret},
+		{name: "control, off: plain http via CONNECT gets the real secret", requireTLS: false, send: httpViaCONNECT, want: requireTLSRealSecret},
 		{name: "control, off: absolute-form http gets the real secret", requireTLS: false, send: absoluteForm, want: requireTLSRealSecret},
 	}
 
@@ -225,6 +232,73 @@ func TestIntegration_RequireTLS_SecretsInjectOnlyInsideTLS(t *testing.T) {
 				t.Fatalf("unknown send mode %q", tc.send)
 			}
 			require.Equal(t, "Bearer "+tc.want, got)
+		})
+	}
+}
+
+// A plain ws:// upgrade goes through the transform pipeline before
+// handleWebSocket dials upstream, so require_tls applies to it too.
+func TestIntegration_RequireTLS_PlainWebSocketUpgrade(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	cases := []struct {
+		name       string
+		requireTLS bool
+		want       string
+	}{
+		{name: "require_tls keeps the placeholder", requireTLS: true, want: requireTLSPlaceholder},
+		{name: "control, off: gets the real secret", requireTLS: false, want: requireTLSRealSecret},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gotAuth := make(chan string, 1)
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = ln.Close() })
+			go func() {
+				conn, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				req, err := http.ReadRequest(bufio.NewReader(conn))
+				if err != nil {
+					return
+				}
+				gotAuth <- req.Header.Get("Authorization")
+				// Write errors surface as a failed upgrade on the client side.
+				_, _ = io.WriteString(conn, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			}()
+			target := ln.Addr().String()
+
+			_, tunnelAddr, _ := startTunnelProxy(t, []transform.Transformer{newRequireTLSSecrets(t, "127.0.0.1", tc.requireTLS)})
+			conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+			require.NoError(t, err)
+			defer conn.Close()
+
+			_, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+			require.NoError(t, err)
+			br := bufio.NewReader(conn)
+			resp, err := http.ReadResponse(br, nil)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			_, err = fmt.Fprintf(conn, "GET /ws HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
+				"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nAuthorization: Bearer %s\r\n\r\n",
+				target, requireTLSPlaceholder)
+			require.NoError(t, err)
+			require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+			resp, err = http.ReadResponse(br, nil)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+
+			select {
+			case got := <-gotAuth:
+				require.Equal(t, "Bearer "+tc.want, got)
+			case <-time.After(5 * time.Second):
+				t.Fatal("upstream did not receive the upgrade request")
+			}
 		})
 	}
 }
