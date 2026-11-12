@@ -503,10 +503,12 @@ Secret sources:
   reference) using a 1Password service account token. The token is read from
   `OP_SERVICE_ACCOUNT_TOKEN`. Optional `ttl` and `failure_ttl` are supported.
 - **`turnkey`:** exports `secret_id` from `organization_id` in
-  [Turnkey Managed Secrets](https://docs.turnkey.com/features/secrets) using the proxy-side
-  API key in `TURNKEY_API_PRIVATE_KEY` (or `api_private_key_env`). Optional `ttl`
-  and `failure_ttl` are supported. See the [Turnkey source notes](internal/transform/secrets/README.md#turnkey-managed-secrets)
-  for setup and approval/cache limits.
+  [Turnkey Managed Secrets](https://docs.turnkey.com/features/secrets). The API
+  private key is read from `TURNKEY_API_PRIVATE_KEY`, or from the variable named
+  by `api_private_key_env`; scope its policy to exporting that secret. If an
+  export needs approval, the fetch fails with `approval_required, activity <id>`
+  and later fetches check that activity instead of submitting a new export; a
+  reload or restart discards it. Optional `ttl` and `failure_ttl` are supported.
 - **`1password_connect`:** resolves the same `op://vault/item/[section/]field`
   `secret_ref` against a self-hosted 1Password Connect server. The server URL
   is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN`.
