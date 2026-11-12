@@ -447,7 +447,8 @@ The sandbox never holds real credentials. Instead:
 
 1. Configure iron-proxy with the real secret source: environment variables, a
    file on disk, AWS Secrets Manager, AWS Systems Manager Parameter Store,
-   Vault KV, 1Password (service account), or 1Password Connect.
+   Vault KV, 1Password (service account), 1Password Connect, or
+   [Turnkey Managed Secrets](https://docs.turnkey.com/features/secrets).
 2. Give the sandbox a proxy token (e.g., `proxy-openai-abc123`).
 3. Configure the `secrets` transform to map proxy tokens to those sources.
 
@@ -501,6 +502,13 @@ Secret sources:
 - **`1password`:** resolves `secret_ref` (an `op://vault/item/[section/]field`
   reference) using a 1Password service account token. The token is read from
   `OP_SERVICE_ACCOUNT_TOKEN`. Optional `ttl` and `failure_ttl` are supported.
+- **`turnkey`:** exports `secret_id` from `organization_id` in
+  [Turnkey Managed Secrets](https://docs.turnkey.com/features/secrets). The API
+  private key is read from `TURNKEY_API_PRIVATE_KEY`, or from the variable named
+  by `api_private_key_env`; scope its policy to exporting that secret. If an
+  export needs approval, the fetch fails with `approval_required, activity <id>`
+  and later fetches check that activity instead of submitting a new export; a
+  reload or restart discards it. Optional `ttl` and `failure_ttl` are supported.
 - **`1password_connect`:** resolves the same `op://vault/item/[section/]field`
   `secret_ref` against a self-hosted 1Password Connect server. The server URL
   is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN`.
@@ -513,7 +521,9 @@ extracted. Use it to pull one field out of a JSON secret.
 `ttl` controls how long a successfully fetched value is cached before refresh
 (empty caches forever). `failure_ttl` controls how long a fetch error is
 cached before retrying; it defaults to 1m and is independent of `ttl`, so a
-long success TTL does not delay recovery from a transient backend outage.
+long success TTL does not delay recovery from an initial backend outage.
+After a successful fetch, refresh errors serve the stale value and retry after
+half of `ttl`; `failure_ttl` applies only before the first success.
 
 For example, to select `api_key` from a KV v2 secret stored at
 `secret/services/openai`:
