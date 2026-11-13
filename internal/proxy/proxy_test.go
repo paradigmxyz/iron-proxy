@@ -677,6 +677,44 @@ func TestHTTPProxy_RequestContentLengthPreserved(t *testing.T) {
 	require.Equal(t, requestBody, gotBody)
 }
 
+func TestHTTPProxy_GetHeadBodyless(t *testing.T) {
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		t.Run(method, func(t *testing.T) {
+			var gotBody []byte
+			var hasContentLengthHeader bool
+			var hasTransferEncoding bool
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, hasContentLengthHeader = r.Header["Content-Length"]
+				hasTransferEncoding = len(r.TransferEncoding) > 0
+				if r.Body != nil {
+					gotBody, _ = io.ReadAll(r.Body)
+				}
+				w.WriteHeader(http.StatusOK)
+				if r.Method != http.MethodHead {
+					_, _ = fmt.Fprint(w, "response body")
+				}
+			}))
+			defer upstream.Close()
+
+			_, httpAddr, _, _ := startProxy(t)
+
+			req, err := http.NewRequest(method, fmt.Sprintf("http://%s/test", httpAddr), nil)
+			require.NoError(t, err)
+			req.Host = upstream.Listener.Addr().String()
+
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			require.Empty(t, gotBody)
+			require.False(t, hasContentLengthHeader, "body-less %s request should not send Content-Length header upstream", method)
+			require.False(t, hasTransferEncoding, "body-less %s request should not send Transfer-Encoding header upstream", method)
+		})
+	}
+}
+
 func TestHTTPProxy_ContentLengthPreserved(t *testing.T) {
 	const responseBody = "fixed-size body"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
