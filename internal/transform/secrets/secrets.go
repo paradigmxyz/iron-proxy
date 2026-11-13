@@ -337,9 +337,19 @@ func (s *Secrets) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	}
 	var swapped, injected []secretRecord
 	var unavailable []string
+	// The MITM tunnel preflight is the synthetic CONNECT from tunnelTransformCheck.
+	// It never carries the proxy token, and the proxy does not send it upstream.
+	// Skip the entry before resolving the secret: an unavailable source must not
+	// reject the preflight, and the real value must not be fetched or injected.
+	// A CONNECT on the direct listener, a CONNECT inside the tunnel, and an
+	// sni-only preflight are not this case. Those still have to present the token.
+	mitmPreflight := tctx.TunnelPreflight && tctx.Mode == transform.ModeMITM
 
 	for _, sec := range s.secrets {
 		if !hostmatch.MatchAnyRule(sec.rules, req) {
+			continue
+		}
+		if mitmPreflight {
 			continue
 		}
 
