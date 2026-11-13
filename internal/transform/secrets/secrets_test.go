@@ -705,7 +705,7 @@ func TestSecrets_RequireTunnelPreflight(t *testing.T) {
 		inside    bool
 		inject    bool
 		fail      bool
-		want      transform.Action
+		want      transform.TransformAction
 		calls     int
 	}{
 		{name: "mitm preflight", method: http.MethodConnect, mode: transform.ModeMITM, preflight: true, want: transform.ActionContinue, calls: 0},
