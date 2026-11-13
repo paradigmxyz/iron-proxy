@@ -669,35 +669,91 @@ func TestSecrets_RequireRejectsNoHeaders(t *testing.T) {
 	require.Equal(t, transform.ActionReject, res.Action)
 }
 
-func TestSecrets_RequirePassesMITMTunnelConnect(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
-		e.Require = true
-	})})
-	tctx := &transform.TransformContext{Mode: transform.ModeMITM}
-
-	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
-	req.Host = "api.openai.com:443"
-	res, err := s.TransformRequest(context.Background(), tctx, req)
-	require.NoError(t, err)
-	require.Equal(t, transform.ActionContinue, res.Action)
-
-	// The requests inside the tunnel still need the proxy token.
-	req = httptest.NewRequest(http.MethodGet, "https://api.openai.com/v1/models", nil)
-	res, err = s.TransformRequest(context.Background(), tctx, req)
-	require.NoError(t, err)
-	require.Equal(t, transform.ActionReject, res.Action)
+// callSource counts Get calls so a preflight can prove it never resolves the secret.
+type callSource struct {
+	calls int
+	err   error
 }
 
-func TestSecrets_RequireRejectsSNIOnlyTunnelConnect(t *testing.T) {
-	s := makeSecrets(t, []secretEntry{defaultEntry(func(e *secretEntry) {
-		e.Require = true
-	})})
+func (c *callSource) Name() string { return "counted" }
+func (c *callSource) Get(context.Context) (string, error) {
+	c.calls++
+	if c.err != nil {
+		return "", c.err
+	}
+	return "sk-real-openai-key", nil
+}
 
+type fixedBuilder struct{ src secretSource }
+
+func (b fixedBuilder) Build(yaml.Node) (secretSource, error) { return b.src, nil }
+
+func connectReq() *http.Request {
 	req := httptest.NewRequest(http.MethodConnect, "http://api.openai.com:443", nil)
 	req.Host = "api.openai.com:443"
-	res, err := s.TransformRequest(context.Background(), &transform.TransformContext{Mode: transform.ModeSNIOnly}, req)
-	require.NoError(t, err)
-	require.Equal(t, transform.ActionReject, res.Action)
+	return req
+}
+
+// TestSecrets_RequireTunnelPreflight is the require decision for a CONNECT.
+// Only the MITM tunnel preflight passes, and it does so without resolving the secret.
+func TestSecrets_RequireTunnelPreflight(t *testing.T) {
+	cases := []struct {
+		name      string
+		method    string
+		mode      transform.Mode
+		preflight bool
+		inside    bool
+		inject    bool
+		fail      bool
+		want      transform.Action
+		calls     int
+	}{
+		{name: "mitm preflight", method: http.MethodConnect, mode: transform.ModeMITM, preflight: true, want: transform.ActionContinue, calls: 0},
+		{name: "mitm preflight with unavailable source", method: http.MethodConnect, mode: transform.ModeMITM, preflight: true, fail: true, want: transform.ActionContinue, calls: 0},
+		{name: "mitm preflight with inject", method: http.MethodConnect, mode: transform.ModeMITM, preflight: true, inject: true, want: transform.ActionContinue, calls: 0},
+		{name: "sni-only preflight", method: http.MethodConnect, mode: transform.ModeSNIOnly, preflight: true, want: transform.ActionReject, calls: 1},
+		{name: "direct connect", method: http.MethodConnect, mode: transform.ModeMITM, want: transform.ActionReject, calls: 1},
+		{name: "connect inside the tunnel", method: http.MethodConnect, mode: transform.ModeMITM, inside: true, want: transform.ActionReject, calls: 1},
+		{name: "get inside the tunnel", method: http.MethodGet, mode: transform.ModeMITM, inside: true, want: transform.ActionReject, calls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &callSource{}
+			if tc.fail {
+				src.err = fmt.Errorf("unavailable")
+			}
+			entry := secretEntry{
+				Source: yamlNode(t, map[string]string{"type": "env", "var": "OPENAI_API_KEY"}),
+				Rules:  []hostmatch.RuleConfig{{Host: "api.openai.com"}},
+			}
+			if tc.inject {
+				entry.Inject = &injectConfig{Header: "Authorization", Require: true}
+			} else {
+				entry.ProxyValue = "proxy-openai-abc123"
+				entry.MatchHeaders = []string{"Authorization"}
+				entry.Require = true
+			}
+			s, err := newFromConfig(secretsConfig{Secrets: []secretEntry{entry}}, sourceBuilderRegistry{"env": fixedBuilder{src: src}})
+			require.NoError(t, err)
+
+			req := httptest.NewRequest(tc.method, "http://api.openai.com/v1/models", nil)
+			req.Host = "api.openai.com"
+			if tc.method == http.MethodConnect {
+				req = connectReq()
+			}
+			tctx := &transform.TransformContext{Mode: tc.mode, TunnelPreflight: tc.preflight}
+			if tc.inside {
+				tctx.Tunnel = &transform.TunnelInfo{Target: "api.openai.com:443"}
+			}
+			res, err := s.TransformRequest(context.Background(), tctx, req)
+			require.NoError(t, err)
+			require.Equal(t, tc.want, res.Action)
+			require.Equal(t, tc.calls, src.calls)
+			if tc.preflight {
+				require.Empty(t, req.Header.Get("Authorization"))
+			}
+		})
+	}
 }
 
 func TestSecrets_RequireWithBodySwap(t *testing.T) {

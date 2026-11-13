@@ -470,6 +470,11 @@ values before forwarding upstream. You control where it looks:
 - **`require`:** when `true`, requests to a matching host that do **not** contain
   the proxy token are rejected with 403. This prevents a compromised workload
   from bypassing the secret-swap mechanism with alternative credentials. Default: `false`.
+  The one exception is the synthetic CONNECT the proxy evaluates before opening
+  a MITM tunnel. That request never carries the proxy token, so `require` lets
+  it pass and does not resolve the secret for it. Every request inside the
+  tunnel is checked again and is still rejected without the token. In `sni-only`
+  mode nothing inside the tunnel is inspected, so that CONNECT stays rejected.
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.
