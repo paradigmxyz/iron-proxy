@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -116,6 +118,16 @@ type Proxy struct {
 	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
 	// NO_PROXY environment variables override these fields when set.
 	UpstreamProxy UpstreamProxy `yaml:"upstream_proxy"`
+	// UpstreamUnixSockets maps exact upstream host names to Unix domain
+	// sockets. Requests to a mapped host are sent as plain HTTP over the
+	// socket instead of being resolved and dialed over TCP.
+	UpstreamUnixSockets []UpstreamUnixSocket `yaml:"upstream_unix_sockets"`
+}
+
+// UpstreamUnixSocket maps one exact host name to a Unix domain socket path.
+type UpstreamUnixSocket struct {
+	Host string `yaml:"host"`
+	Path string `yaml:"path"`
 }
 
 // CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
@@ -315,6 +327,24 @@ func Validate(cfg *Config) error {
 
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
 		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
+	}
+
+	seenUnixHosts := make(map[string]bool, len(cfg.Proxy.UpstreamUnixSockets))
+	for i, s := range cfg.Proxy.UpstreamUnixSockets {
+		host := strings.ToLower(strings.TrimSuffix(s.Host, "."))
+		if host == "" {
+			return fmt.Errorf("proxy.upstream_unix_sockets[%d].host is required", i)
+		}
+		if strings.ContainsAny(host, "*:/") {
+			return fmt.Errorf("proxy.upstream_unix_sockets[%d].host must be an exact host name without port or wildcard; got %q", i, s.Host)
+		}
+		if seenUnixHosts[host] {
+			return fmt.Errorf("proxy.upstream_unix_sockets[%d].host %q is listed more than once", i, s.Host)
+		}
+		seenUnixHosts[host] = true
+		if !filepath.IsAbs(s.Path) {
+			return fmt.Errorf("proxy.upstream_unix_sockets[%d].path must be an absolute path; got %q", i, s.Path)
+		}
 	}
 
 	if cfg.Management.Listen != "" {

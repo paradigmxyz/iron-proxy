@@ -215,6 +215,12 @@ func main() {
 			slog.Any("cidrs", cfg.Proxy.UpstreamDenyCIDRs.Values),
 		)
 	}
+	for _, s := range cfg.Proxy.UpstreamUnixSockets {
+		logger.Info("upstream unix socket configured",
+			slog.String("host", s.Host),
+			slog.String("path", s.Path),
+		)
+	}
 
 	sshServer, sshListener, err := sshproxy.LoadFromNode(ctx, cfg.SSH, guard, auditFunc, logger)
 	if err == nil && *requireSSH && sshServer == nil {
@@ -262,6 +268,7 @@ func main() {
 		Logger:                        logger,
 		UpstreamResponseHeaderTimeout: time.Duration(cfg.Proxy.UpstreamResponseHeaderTimeout),
 		UpstreamProxy:                 cfg.Proxy.UpstreamProxy.ProxyFunc(),
+		UpstreamUnixSockets:           cfg.Proxy.UpstreamUnixSockets,
 		// Managed proxies fail closed until the first control-plane config
 		// has been applied; an un-synced pipeline would otherwise pass
 		// requests through with placeholder credentials intact.
