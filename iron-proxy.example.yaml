@@ -75,6 +75,17 @@ proxy:
   #   http_proxy: "http://proxy.corp:3128"
   #   https_proxy: "http://proxy.corp:3128"
   #   no_proxy: "localhost,127.0.0.1,.internal.example.com"
+  #
+  # Send requests for an exact host name to a local Unix domain socket
+  # instead of resolving DNS and dialing TCP. The upstream must speak plain
+  # HTTP/1.1 on the socket; the Host header keeps the configured name. The
+  # host must still pass the allowlist. If the socket cannot be dialed, the
+  # request fails with 502 (no TCP fallback). Hosts are exact names (no
+  # wildcards, no port; the request port is ignored). upstream_deny_cidrs
+  # does not apply because no IP address is dialed. Read at startup only.
+  # upstream_unix_sockets:
+  #   - host: "llm-gateway.internal"
+  #     path: "/run/llm-gateway/api.sock"
 
 # TLS / MITM configuration
 tls:

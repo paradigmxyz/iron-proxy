@@ -766,6 +766,35 @@ export ALL_PROXY=socks5h://172.20.0.2:8080
 The SOCKS5 implementation supports no-auth only and accepts IPv4, IPv6,
 and domain name address types.
 
+### Unix socket upstreams
+
+Map an exact host name to a local Unix domain socket. Requests for that host
+are sent as plain HTTP/1.1 over the socket instead of resolving DNS and
+dialing TCP. Access to the upstream is then controlled by file permissions on
+the socket, and no loopback TCP port is needed.
+
+```yaml
+proxy:
+  upstream_unix_sockets:
+    - host: "llm-gateway.internal"
+      path: "/run/llm-gateway/api.sock"
+```
+
+- The full transform pipeline still runs first. The host must be allowed by
+  the allowlist; secrets and other transforms apply as usual.
+- Clients can use `http://` or `https://` (MITM). Upstream traffic on the
+  socket is always plain HTTP. The `Host` header keeps the requested name.
+- Host names are exact and case-insensitive. Wildcards and ports are not
+  accepted in the config; the port of a request is ignored.
+- If the socket cannot be dialed, the request fails with `502`. There is no
+  fallback to DNS or TCP.
+- `upstream_deny_cidrs` does not apply to these hosts because no IP address
+  is dialed. Only the config file can add a mapping.
+- SSE streaming and WebSocket upgrades work over the socket. In
+  `tls.mode: sni-only`, HTTPS passthrough to a mapped host is refused because
+  TLS cannot be passed through to a plain HTTP socket.
+- The mapping is read at startup; `POST /v1/reload` does not change it.
+
 ### TLS
 
 iron-proxy generates leaf certificates on the fly, signed by the CA you provide.

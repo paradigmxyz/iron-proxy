@@ -103,6 +103,15 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 		return nil
 	}
 
+	// A host mapped to a Unix socket expects plain HTTP, which a TLS
+	// passthrough cannot provide. Fail closed instead of dialing TCP.
+	if _, ok := p.upstreamUnixSocket(sni); ok {
+		result.Action = transform.ActionContinue
+		result.StatusCode = http.StatusBadGateway
+		result.Err = fmt.Errorf("upstream %q is mapped to a unix socket, which sni-only passthrough does not support", sni)
+		return result.Err
+	}
+
 	// Dial upstream using the proxy's resolver so SNI → IP lookup goes via
 	// the configured upstream DNS (not the proxy's own intercepting server).
 	// The guard's DialControl rejects denied IPs after resolution.

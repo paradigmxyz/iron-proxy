@@ -22,6 +22,7 @@ import (
 	"github.com/ironsh/iron-proxy/internal/certcache"
 	"github.com/ironsh/iron-proxy/internal/config"
 	"github.com/ironsh/iron-proxy/internal/dnsguard"
+	"github.com/ironsh/iron-proxy/internal/hostmatch"
 	"github.com/ironsh/iron-proxy/internal/mcp"
 	"github.com/ironsh/iron-proxy/internal/mcpgateway"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
@@ -45,6 +46,8 @@ type Proxy struct {
 	certCache            *certcache.Cache
 	pipeline             *transform.PipelineHolder
 	transport            *http.Transport
+	unixTransport        *http.Transport
+	unixSockets          map[string]string // normalized host -> socket path
 	resolver             *net.Resolver
 	guard                *dnsguard.Guard
 	mcpPolicy            *mcp.PolicyHolder
@@ -90,6 +93,10 @@ type Options struct {
 	// an upstream SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil
 	// means connect directly. Use config.UpstreamProxy.ProxyFunc to build one.
 	UpstreamProxy func(*http.Request) (*url.URL, error)
+	// UpstreamUnixSockets maps exact host names to Unix domain sockets.
+	// Requests to a mapped host are sent as plain HTTP/1.1 over the socket;
+	// they never fall back to DNS resolution or TCP.
+	UpstreamUnixSockets []config.UpstreamUnixSocket
 	// Ready, when non-nil, gates request handling: while it returns false
 	// every proxied request is rejected with 503. Managed proxies use it to
 	// fail closed until the first control-plane config has been applied, so
@@ -126,6 +133,13 @@ func New(opts Options) *Proxy {
 		logger:               opts.Logger,
 		shutdownCtx:          shutdownCtx,
 		shutdownCancel:       shutdownCancel,
+	}
+	if len(opts.UpstreamUnixSockets) > 0 {
+		p.unixSockets = make(map[string]string, len(opts.UpstreamUnixSockets))
+		for _, s := range opts.UpstreamUnixSockets {
+			p.unixSockets[normalizeUnixSocketHost(s.Host)] = s.Path
+		}
+		p.unixTransport = buildUnixTransport(p.dialUnixUpstream, opts.UpstreamResponseHeaderTimeout)
 	}
 
 	p.httpServer = &http.Server{
@@ -772,7 +786,10 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request, scheme, 
 		Resolver: p.resolver,
 		Control:  p.guard.DialControl,
 	}
-	if upstreamScheme == "wss" {
+	if _, ok := p.upstreamUnixSocket(host); ok {
+		// Unix-socket upstreams speak plain HTTP; never fall back to TCP.
+		upstreamConn, err = p.dialUnixUpstream(r.Context(), "unix", host)
+	} else if upstreamScheme == "wss" {
 		upstreamConn, err = tls.DialWithDialer(
 			dialer,
 			"tcp", upstreamHost,
@@ -932,7 +949,58 @@ func buildTransport(resolver *net.Resolver, guard *dnsguard.Guard, responseHeade
 	}
 }
 
+// buildUnixTransport creates the HTTP transport used for hosts mapped in
+// proxy.upstream_unix_sockets. It never uses an upstream proxy and speaks
+// plain HTTP/1.1 over the socket returned by dial.
+func buildUnixTransport(dial func(context.Context, string, string) (net.Conn, error), responseHeaderTimeout time.Duration) *http.Transport {
+	if responseHeaderTimeout <= 0 {
+		responseHeaderTimeout = config.DefaultUpstreamResponseHeaderTimeout
+	}
+	return &http.Transport{
+		DialContext:           dial,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: responseHeaderTimeout,
+	}
+}
+
+// normalizeUnixSocketHost reduces a Host value to the key used in
+// unixSockets: no port, lower case, no trailing dot.
+func normalizeUnixSocketHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(hostmatch.StripPort(host), "."))
+}
+
+// upstreamUnixSocket returns the socket path mapped to host (with or
+// without port), if any.
+func (p *Proxy) upstreamUnixSocket(host string) (string, bool) {
+	path, ok := p.unixSockets[normalizeUnixSocketHost(host)]
+	return path, ok
+}
+
+// dialUnixUpstream dials the Unix socket mapped to addr (host or host:port).
+// The network argument is ignored so it can serve as an http.Transport
+// DialContext. An unmapped host or a failed dial is an error: there is no
+// TCP fallback.
+func (p *Proxy) dialUnixUpstream(ctx context.Context, _, addr string) (net.Conn, error) {
+	path, ok := p.upstreamUnixSocket(addr)
+	if !ok {
+		return nil, fmt.Errorf("no upstream unix socket configured for %q", addr)
+	}
+	dialer := &net.Dialer{Timeout: 30 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("upstream unix socket for %q: %w", normalizeUnixSocketHost(addr), err)
+	}
+	return conn, nil
+}
+
 func (p *Proxy) doUpstream(req *http.Request) (*http.Response, error) {
+	if _, ok := p.upstreamUnixSocket(req.URL.Host); ok {
+		// Unix-socket upstreams speak plain HTTP even when the client used
+		// TLS to reach the proxy. The Host header keeps the original name.
+		req.URL.Scheme = "http"
+		return p.unixTransport.RoundTrip(req)
+	}
 	return p.transport.RoundTrip(req)
 }
 

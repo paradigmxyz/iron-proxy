@@ -598,3 +598,77 @@ tls:
 		require.Contains(t, err.Error(), "control_plane.poll_interval must be positive")
 	})
 }
+
+func TestUpstreamUnixSockets(t *testing.T) {
+	cases := []struct {
+		name    string
+		entries string
+		wantErr string
+	}{
+		{
+			name: "valid",
+			entries: `
+    - host: "llm-gateway.internal"
+      path: "/run/llm-gateway/api.sock"
+    - host: "other.internal"
+      path: "/run/other.sock"`,
+		},
+		{
+			name: "missing host",
+			entries: `
+    - path: "/run/llm-gateway/api.sock"`,
+			wantErr: "proxy.upstream_unix_sockets[0].host is required",
+		},
+		{
+			name: "wildcard host",
+			entries: `
+    - host: "*.internal"
+      path: "/run/llm-gateway/api.sock"`,
+			wantErr: "must be an exact host name",
+		},
+		{
+			name: "host with port",
+			entries: `
+    - host: "llm-gateway.internal:8080"
+      path: "/run/llm-gateway/api.sock"`,
+			wantErr: "must be an exact host name",
+		},
+		{
+			name: "duplicate host ignores case",
+			entries: `
+    - host: "llm-gateway.internal"
+      path: "/run/a.sock"
+    - host: "LLM-Gateway.internal"
+      path: "/run/b.sock"`,
+			wantErr: "proxy.upstream_unix_sockets[1].host \"LLM-Gateway.internal\" is listed more than once",
+		},
+		{
+			name: "missing path",
+			entries: `
+    - host: "llm-gateway.internal"`,
+			wantErr: "proxy.upstream_unix_sockets[0].path must be an absolute path",
+		},
+		{
+			name: "relative path",
+			entries: `
+    - host: "llm-gateway.internal"
+      path: "run/api.sock"`,
+			wantErr: "proxy.upstream_unix_sockets[0].path must be an absolute path",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			yaml := validYAML() + "proxy:\n  upstream_unix_sockets:" + tc.entries + "\n"
+			cfg, err := Load(strings.NewReader(yaml))
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, []UpstreamUnixSocket{
+				{Host: "llm-gateway.internal", Path: "/run/llm-gateway/api.sock"},
+				{Host: "other.internal", Path: "/run/other.sock"},
+			}, cfg.Proxy.UpstreamUnixSockets)
+		})
+	}
+}
