@@ -111,6 +111,8 @@ func TestTunnel_CONNECT_HTTP(t *testing.T) {
 func TestTunnel_CONNECT_HTTPS_MITM(t *testing.T) {
 	// Start an upstream HTTPS server
 	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Empty(t, r.Header.Get("Content-Length"), "GET request over HTTPS MITM tunnel should not have Content-Length")
+		require.Empty(t, r.TransferEncoding, "GET request over HTTPS MITM tunnel should not have Transfer-Encoding")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprint(w, "hello from tls tunnel")
 	}))
