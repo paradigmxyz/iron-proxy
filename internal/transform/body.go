@@ -17,6 +17,9 @@ import (
 //
 // A maxBytes of 0 means unlimited; when the limit is exceeded the body is
 // truncated silently.
+//
+// TeeTo adds a third mode: an observer can take a streaming *copy* of the bytes
+// without forcing the all-or-nothing buffering above. See TeeTo.
 type BufferedBody struct {
 	once     sync.Once
 	mu       sync.Mutex // protects pos only
@@ -24,6 +27,7 @@ type BufferedBody struct {
 	data     []byte
 	pos      int
 	maxBytes int64
+	tee      io.Writer
 }
 
 // NewBufferedBody wraps an io.ReadCloser for lazy buffering. maxBytes caps
@@ -61,6 +65,35 @@ func (b *BufferedBody) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// TeeTo installs sink as a streaming copy of the bytes this body hands to its
+// consumer. Installing a tee does not read, buffer, or delay the body: the copy
+// happens byte-for-byte as the consumer (the response write or the upstream
+// send) pulls them through, so an observer can watch a slow or never-ending
+// stream without the consumer ever waiting on it.
+//
+// Two rules the sink must honor, because it sits inline on the consumer's read
+// path:
+//
+//   - Write must not block. Anything the sink waits for, the client waits for.
+//   - Write must bound its own memory. TeeTo imposes no cap; a sink that wants
+//     one drops the excess (see internal/transform/bodycapture) rather than
+//     applying back-pressure, which would stall the consumer.
+//
+// A sink write error is discarded: an observer failing must never turn into a
+// read error for the consumer.
+//
+// The copy happens exactly once, on whichever path consumes the underlying
+// reader - StreamingReader (which hands off original and clears it) or buffer()
+// (which consumes it under sync.Once). Only one of them can win. A body that is
+// never consumed is never tee'd, and a body replaced wholesale by a later
+// transform (NewBufferedBodyFromBytes) drops the tee with it.
+//
+// Call before the body is consumed; a later call has no effect on bytes already
+// delivered.
+func (b *BufferedBody) TeeTo(sink io.Writer) {
+	b.tee = sink
+}
+
 // buffer eagerly reads the entire original body into memory exactly once.
 func (b *BufferedBody) buffer() error {
 	var err error
@@ -72,6 +105,12 @@ func (b *BufferedBody) buffer() error {
 		b.data, err = io.ReadAll(r)
 		b.original.Close()
 		b.original = nil
+		// The buffering path consumed the reader, so StreamingReader will serve
+		// from b.data and never see the tee. Feed the sink here instead, so the
+		// copy still happens exactly once whichever path wins.
+		if b.tee != nil && len(b.data) > 0 {
+			_, _ = b.tee.Write(b.data)
+		}
 	})
 	return err
 }
@@ -92,6 +131,12 @@ func (b *BufferedBody) StreamingReader() io.Reader {
 	if b.original != nil {
 		r := b.original
 		b.original = nil
+		if b.tee != nil {
+			// Streaming path: the consumer drives the copy. Deliberately not
+			// io.TeeReader - that propagates a sink write error to the consumer,
+			// which would let a failing observer break the client's stream.
+			return &teeReader{r: r, w: b.tee}
+		}
 		return r
 	}
 	b.mu.Lock()
@@ -117,6 +162,24 @@ func (b *BufferedBody) Close() error {
 		return err
 	}
 	return nil
+}
+
+// teeReader copies what it reads into w, best effort. Unlike io.TeeReader it
+// swallows the sink's write errors and short writes: the reader's job is to
+// deliver bytes to the consumer, and an observer must never be able to fail
+// that. It intentionally implements neither io.WriterTo nor io.ReaderFrom, so
+// io.Copy cannot bypass Read and skip the copy.
+type teeReader struct {
+	r io.Reader
+	w io.Writer
+}
+
+func (t *teeReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if n > 0 {
+		_, _ = t.w.Write(p[:n])
+	}
+	return n, err
 }
 
 // RequireBufferedBody asserts that body is a *BufferedBody and returns it.

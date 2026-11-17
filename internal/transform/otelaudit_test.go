@@ -319,3 +319,61 @@ func mapFromValue(v log.Value) map[string]log.Value {
 	}
 	return m
 }
+
+func TestOTELAuditFunc_BodyCapture_ResponseFieldsJoinTheSameGroup(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:       "api.anthropic.com",
+		Method:     "POST",
+		Path:       "/v1/messages",
+		StartedAt:  time.Now(),
+		Duration:   50 * time.Millisecond,
+		Action:     ActionContinue,
+		StatusCode: 200,
+		BodyCapture: &fakeBodyCapture{
+			body:              `{"prompt":"hi"}`,
+			respBody:          "data: {\"delta\":\"hello\"}\n\n",
+			respBodyTruncated: true,
+		},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	attrs := recordAttrs(records[0])
+	require.Contains(t, attrs, "body_capture")
+	bc := mapFromValue(attrs["body_capture"])
+	require.Equal(t, `{"prompt":"hi"}`, bc["request_body"].AsString())
+	require.Equal(t, "data: {\"delta\":\"hello\"}\n\n", bc["response_body"].AsString())
+	require.True(t, bc["response_body_truncated"].AsBool())
+}
+
+func TestOTELAuditFunc_BodyCapture_ResponseOnlyStillEmitsGroup(t *testing.T) {
+	proc := &recordProcessor{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
+	auditFunc := NewOTELAuditFunc(provider)
+
+	auditFunc(&PipelineResult{
+		Host:        "api.anthropic.com",
+		Method:      "GET",
+		Path:        "/v1/models",
+		StartedAt:   time.Now(),
+		Duration:    50 * time.Millisecond,
+		Action:      ActionContinue,
+		StatusCode:  200,
+		BodyCapture: &fakeBodyCapture{respBody: `{"data":[]}`},
+	})
+
+	records := proc.Records()
+	require.Len(t, records, 1)
+
+	attrs := recordAttrs(records[0])
+	require.Contains(t, attrs, "body_capture")
+	bc := mapFromValue(attrs["body_capture"])
+	require.NotContains(t, bc, "request_body")
+	require.Equal(t, `{"data":[]}`, bc["response_body"].AsString())
+	require.False(t, bc["response_body_truncated"].AsBool())
+}
