@@ -765,6 +765,13 @@ transforms:
 #         var: PG_ANALYTICS_DSN
 #       role: analytics_role
 
+# Health listener. Always on; serves GET /healthz (200 OK while the process
+# is up). Binds all interfaces on :9090 by default. Set listen (or the
+# IRON_METRICS_LISTEN env var) to bind loopback or a private network when
+# workloads must not reach it.
+# metrics:
+#   listen: ":9090"
+
 # Optional management API. When `listen` is empty (default), the management
 # server is disabled. When set, the proxy serves an authenticated
 # POST /v1/reload endpoint that re-reads this YAML file and atomically swaps in
