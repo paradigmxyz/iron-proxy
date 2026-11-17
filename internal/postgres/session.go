@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -223,7 +224,8 @@ func dialUpstream(ctx context.Context, upstream *Upstream) (*pgconn.PgConn, erro
 }
 
 // applySessionSetup prepares the upstream session before the relay starts: it
-// applies the upstream's pinned settings, then issues `SET ROLE "<role>"`.
+// applies the proxy-managed lexer settings and the upstream's pinned settings,
+// then issues `SET ROLE "<role>"`.
 //
 // Settings are applied first, while the session still runs as the connecting
 // (login) user, so a setting that requires elevated privilege isn't blocked by
@@ -237,7 +239,7 @@ func dialUpstream(ctx context.Context, upstream *Upstream) (*pgconn.PgConn, erro
 // between queries and would defeat the policy; that constraint is enforced by
 // deployment configuration rather than by a runtime probe.
 func applySessionSetup(ctx context.Context, conn *pgconn.PgConn, upstream *Upstream) error {
-	for _, s := range upstream.Settings() {
+	for _, s := range append(slices.Clone(lexerSettings), upstream.Settings()...) {
 		rr := conn.ExecParams(ctx, "SELECT set_config($1, $2, false)",
 			[][]byte{[]byte(s.Name), []byte(s.Value)}, nil, nil, nil)
 		if _, err := rr.Close(); err != nil {
