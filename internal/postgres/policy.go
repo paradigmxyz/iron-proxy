@@ -44,6 +44,26 @@ const (
 	RejectCallbackDefinition
 )
 
+// lexerSettings are the session settings that change how PostgreSQL tokenizes
+// SQL text. The classifier parses with libpg_query's fixed defaults
+// (standard_conforming_strings=on, UTF-8 input), so the proxy pins these on
+// every upstream session and forbids clients from changing them; otherwise the
+// proxy and the server could disagree about where a string literal ends.
+var lexerSettings = []Setting{
+	{Name: "standard_conforming_strings", Value: "on"},
+	{Name: "client_encoding", Value: "UTF8"},
+}
+
+// isLexerSetting reports whether name (lowercased) is one of lexerSettings.
+func isLexerSetting(name string) bool {
+	for _, s := range lexerSettings {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // ClassifyClientStatement inspects sql and returns whether the relay should
 // reject it before forwarding upstream. (reason == 0) means "allow". pinned is
 // the lowercased set of setting names this upstream forbids the client from
@@ -89,7 +109,7 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectDiscardAll
 	}
 	for _, name := range op.SetGUCs {
-		if _, ok := pinned[name]; ok {
+		if _, ok := pinned[name]; ok || isLexerSetting(name) {
 			return false, RejectPinnedSetting
 		}
 	}

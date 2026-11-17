@@ -407,6 +407,9 @@ func compileSettings(ctx string, settings []Setting) ([]Setting, map[string]stru
 		if lower == "role" || lower == "session_authorization" {
 			return nil, nil, fmt.Errorf("%s: settings[%d]: %q is managed by the proxy; use the role field", ctx, i, s.Name)
 		}
+		if isLexerSetting(lower) {
+			return nil, nil, fmt.Errorf("%s: settings[%d]: %q is managed by the proxy", ctx, i, s.Name)
+		}
 		if _, dup := pinned[lower]; dup {
 			return nil, nil, fmt.Errorf("%s: duplicate setting %q", ctx, s.Name)
 		}

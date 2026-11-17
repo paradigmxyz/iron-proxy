@@ -110,25 +110,32 @@ func parsePrefix(raw string) (netip.Prefix, error) {
 	return p.Masked(), nil
 }
 
-// IsDenied reports whether ip falls inside any configured deny prefix.
+// IsDenied reports whether ip falls inside any configured deny prefix. Any
+// IPv6 zone is ignored: a zoned address names the same host as the unzoned
+// one for deny purposes.
 func (g *Guard) IsDenied(ip netip.Addr) bool {
 	if g == nil || len(g.prefixes) == 0 {
 		return false
 	}
-	ip = ip.Unmap()
+	_, denied := g.match(ip)
+	return denied
+}
+
+func (g *Guard) match(ip netip.Addr) (netip.Prefix, bool) {
+	ip = ip.WithZone("").Unmap()
 	for _, p := range g.prefixes {
 		if p.Contains(ip) {
-			return true
+			return p, true
 		}
 	}
-	return false
+	return netip.Prefix{}, false
 }
 
 // DialControl is the net.Dialer.Control hook. Go invokes it after DNS
 // resolution with the literal "host:port" about to be connected to; host is
 // already an IP at this point, so name-based dials and IP-literal dials
 // (e.g. SOCKS5 IPv4 atyp) are both covered. Returning an error aborts the
-// connect.
+// connect. An address that cannot be parsed is refused rather than allowed.
 func (g *Guard) DialControl(_ string, address string, _ syscall.RawConn) error {
 	if g == nil || len(g.prefixes) == 0 {
 		return nil
@@ -137,15 +144,15 @@ func (g *Guard) DialControl(_ string, address string, _ syscall.RawConn) error {
 	if err != nil {
 		host = address
 	}
-	addr, err := netip.ParseAddr(host)
+	// Go renders a zoned IPv4-mapped address as "a.b.c.d%zone", which
+	// netip.ParseAddr rejects, so strip the zone before parsing.
+	ipStr, _, _ := strings.Cut(host, "%")
+	addr, err := netip.ParseAddr(ipStr)
 	if err != nil {
-		return nil
+		return fmt.Errorf("upstream_deny_cidrs: refusing unparseable dial address %q", address)
 	}
-	addr = addr.Unmap()
-	for _, p := range g.prefixes {
-		if p.Contains(addr) {
-			return &DenyError{Address: host, Prefix: p}
-		}
+	if p, denied := g.match(addr); denied {
+		return &DenyError{Address: host, Prefix: p}
 	}
 	return nil
 }

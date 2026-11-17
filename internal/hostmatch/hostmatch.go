@@ -7,6 +7,7 @@ import (
 	"net"
 	"path"
 	"strings"
+	"unicode/utf8"
 )
 
 // Matcher checks whether a host matches a set of domain globs or, when the
@@ -35,8 +36,12 @@ func New(domains []string, cidrs []string) (*Matcher, error) {
 
 // Matches returns true if the host matches any domain glob, or — when the
 // host is itself a literal IP — falls inside any configured CIDR range. The
-// host should already have the port stripped.
+// host should already have the port stripped. Hosts that are not in canonical
+// form (see IsCanonicalHost) never match.
 func (m *Matcher) Matches(host string) bool {
+	if !IsCanonicalHost(host) {
+		return false
+	}
 	for _, pattern := range m.domains {
 		if MatchGlob(pattern, host) {
 			return true
@@ -56,12 +61,28 @@ func (m *Matcher) Matches(host string) bool {
 	return false
 }
 
+// IsCanonicalHost reports whether host (port already stripped) is in the
+// ASCII form the network stack dials. Non-ASCII names are rejected because
+// policy would compare them differently than the transport's IDNA encoding,
+// and "%" is rejected because an IPv6 zone identifier would let an IP literal
+// carry an arbitrary domain-like suffix.
+func IsCanonicalHost(host string) bool {
+	for i := 0; i < len(host); i++ {
+		if host[i] >= utf8.RuneSelf || host[i] == '%' {
+			return false
+		}
+	}
+	return true
+}
+
 // MatchGlob matches a domain against a glob pattern.
 // "*" matches any host. "*.example.com" matches any subdomain depth and
-// "example.com" itself. Matching is case-insensitive per RFC 4343.
+// "example.com" itself. Matching is ASCII case-insensitive per RFC 4343;
+// Unicode case folding is deliberately not applied (e.g. U+0130 must not
+// fold to "i").
 func MatchGlob(pattern, name string) bool {
-	pattern = strings.ToLower(pattern)
-	name = strings.ToLower(name)
+	pattern = asciiLower(pattern)
+	name = asciiLower(name)
 	if pattern == "*" {
 		return true
 	}
@@ -71,6 +92,16 @@ func MatchGlob(pattern, name string) bool {
 	}
 	matched, _ := path.Match(pattern, name)
 	return matched
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
 
 // StripPort removes the port from a host:port string. If there's no port,

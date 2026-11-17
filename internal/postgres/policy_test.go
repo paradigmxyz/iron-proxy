@@ -64,6 +64,15 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "current_setting pinned allowed", sql: "SELECT current_setting('centaur.slack_channel_id')", pinned: pinned, allowed: true},
 		// A setting that isn't pinned passes through.
 		{name: "set unpinned allowed", sql: "SET centaur.other = 'x'", pinned: pinned, allowed: true},
+		// Settings that change SQL tokenization are always pinned by the proxy
+		// so the classifier and the server agree on string-literal boundaries.
+		{name: "set standard_conforming_strings rejected", sql: "SET standard_conforming_strings = off", reason: RejectPinnedSetting},
+		{name: "set local standard_conforming_strings rejected", sql: "SET LOCAL standard_conforming_strings TO off", reason: RejectPinnedSetting},
+		{name: "reset standard_conforming_strings rejected", sql: "RESET standard_conforming_strings", reason: RejectPinnedSetting},
+		{name: "set client_encoding rejected", sql: "SET client_encoding = 'SJIS'", reason: RejectPinnedSetting},
+		{name: "set names rejected", sql: "SET NAMES 'SJIS'", reason: RejectPinnedSetting},
+		{name: "reset client_encoding rejected", sql: "RESET client_encoding", reason: RejectPinnedSetting},
+		{name: "set standard_conforming_strings in batch rejected", sql: "SELECT 1; SET standard_conforming_strings = off", reason: RejectPinnedSetting},
 		// Without a pin, the same SET is allowed.
 		{name: "set formerly-pinned allowed without pin", sql: "SET centaur.slack_channel_id = 'C999'", allowed: true},
 

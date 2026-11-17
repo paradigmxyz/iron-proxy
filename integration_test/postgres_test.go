@@ -334,6 +334,33 @@ func TestPostgresPolicy(t *testing.T) {
 		require.Contains(t, pgErr.Message, "set_config is not supported")
 	})
 
+	t.Run("string-literal lexing settings are pinned", func(t *testing.T) {
+		// With standard_conforming_strings=off the server would end the first
+		// literal at \' and run the trailing RESET ROLE, while the proxy's
+		// parser sees one SELECT. The proxy pins the setting so both agree.
+		conn := dial(t, pgClientPassword)
+		for _, sql := range []string{
+			"SET standard_conforming_strings = off",
+			"RESET standard_conforming_strings",
+			"SET client_encoding = 'SJIS'",
+		} {
+			err := exec(t, conn, sql)
+			require.Error(t, err, sql)
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr), sql)
+			require.Contains(t, pgErr.Message, "managed by the proxy", sql)
+		}
+
+		results, err := conn.Exec(context.Background(), "SELECT current_setting('standard_conforming_strings'), current_setting('client_encoding')").ReadAll()
+		require.NoError(t, err)
+		require.Equal(t, "on", string(results[0].Rows[0][0]))
+		require.Equal(t, "UTF8", string(results[0].Rows[0][1]))
+
+		// Under pinned semantics the payload is a single harmless SELECT.
+		require.NoError(t, exec(t, conn, `SELECT 'a\'; SELECT '; RESET ROLE; --'`))
+		require.Equal(t, pgRole, currentRole(t, conn))
+	})
+
 	t.Run("session setting is injected at session start", func(t *testing.T) {
 		// The proxy applied SET via set_config for app.tenant_label during the
 		// handshake, so the client's first query already sees the value.

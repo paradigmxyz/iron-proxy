@@ -55,7 +55,10 @@ Single binary. Single YAML config.
   in depth, revoke `EXECUTE` on `pg_catalog.set_config` and unneeded
   `TEMPORARY` / `CREATE` privileges from the injected role (e.g. from
   `PUBLIC`), granting `set_config` back only to the login user that the proxy
-  uses for session setup. Pairs with
+  uses for session setup. The proxy always pins `standard_conforming_strings=on`
+  and `client_encoding=UTF8` on the upstream session and rejects client
+  attempts to change them, so its SQL parser and the server agree on how
+  statements are tokenized. Pairs with
   PostgreSQL row-level security to give per-tenant data isolation when the
   application connects as a shared service-account user. **Requires
   PgBouncer (if used) to run in `pool_mode = session`** — transaction or
@@ -324,7 +327,12 @@ Default-deny. Requests must match at least one domain glob or CIDR to proceed.
 Unmatched requests get a `403 Forbidden`.
 
 Domain patterns use glob matching: `*.example.com` matches any subdomain and
-`example.com` itself.
+`example.com` itself. Matching is ASCII case-insensitive; write
+internationalized domains in their punycode (`xn--`) form. Requests whose host
+is not plain ASCII or carries an IPv6 zone identifier, whose path contains `.`
+or `..` segments (including `..;` and `..\` forms), or whose request target is
+not origin-form or absolute-form are rejected with `400 Bad Request` before any
+transform runs.
 
 **Warn mode:** Set `warn: true` to observe what the allowlist would block without
 actually enforcing it. Requests that would be rejected are allowed through but
