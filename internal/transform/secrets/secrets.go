@@ -150,6 +150,7 @@ func defaultRegistry(logger *slog.Logger) sourceBuilderRegistry {
 		"aws_ssm":           newAWSSSMBuilder(logger),
 		"vault_kv":          newVaultKVBuilder(logger),
 		"1password":         newOPBuilder(logger),
+		"turnkey":           newTurnkeyBuilder(logger),
 		"1password_connect": newOPConnectBuilder(logger),
 	}
 }
