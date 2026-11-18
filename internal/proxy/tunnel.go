@@ -29,7 +29,45 @@ func (p *Proxy) listenTunnel() error {
 	if err != nil {
 		return fmt.Errorf("tunnel listen: %w", err)
 	}
-	p.tunnelListener = ln
+	if !p.trackTunnel(ln, true) {
+		return nil
+	}
+	return p.acceptTunnel(ln)
+}
+
+// listenExtraTunnel starts a further tunnel listener on addr, served as the
+// one on tunnelAddr is.
+func (p *Proxy) listenExtraTunnel(addr string) error {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("tunnel listen %s: %w", addr, err)
+	}
+	if !p.trackTunnel(ln, false) {
+		return nil
+	}
+	return p.acceptTunnel(ln)
+}
+
+// trackTunnel records a bound tunnel listener for Shutdown to close, the
+// primary one or a further one. One bound after Shutdown is closed at once,
+// and trackTunnel reports false.
+func (p *Proxy) trackTunnel(ln net.Listener, primary bool) bool {
+	p.tunnelMu.Lock()
+	defer p.tunnelMu.Unlock()
+	if p.tunnelClosed {
+		_ = ln.Close()
+		return false
+	}
+	if primary {
+		p.tunnelListener = ln
+	} else {
+		p.extraTunnelListeners = append(p.extraTunnelListeners, ln)
+	}
+	return true
+}
+
+// acceptTunnel accepts tunnel connections on ln until Shutdown.
+func (p *Proxy) acceptTunnel(ln net.Listener) error {
 	p.logger.Info("tunnel proxy starting", slog.String("addr", ln.Addr().String()))
 
 	for {

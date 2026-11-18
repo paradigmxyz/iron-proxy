@@ -16,8 +16,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ironsh/iron-proxy/internal/certcache"
@@ -63,6 +65,15 @@ type Proxy struct {
 	// allowlisted hostname onto a different port. Overridable in tests.
 	sniUpstreamPort string
 	ready           func() bool
+
+	// extraTunnelAddrs are further addresses the tunnel listens on, each
+	// served exactly as tunnelAddr is. tunnelMu guards tunnelListener once
+	// ListenAndServe runs, extraTunnelListeners (the further ones bound so
+	// far) and tunnelClosed (set by Shutdown).
+	extraTunnelAddrs     []string
+	tunnelMu             sync.Mutex
+	extraTunnelListeners []net.Listener
+	tunnelClosed         bool
 }
 
 const notReadyMessage = "proxy is not ready: awaiting control-plane config"
@@ -97,6 +108,11 @@ type Options struct {
 	// requests can never pass through un-transformed (leaking placeholder
 	// credentials upstream) during startup.
 	Ready func() bool
+	// ExtraTunnelAddrs are further addresses for the tunnel listener. Each
+	// serves CONNECT, absolute-form HTTP and SOCKS5 exactly as TunnelAddr
+	// does, with the same pipeline (so a reload reaches every one), and a
+	// bind failure on any of them fails ListenAndServe. Shutdown closes them.
+	ExtraTunnelAddrs []string
 }
 
 // New creates a new Proxy. In TLSModeMITM, certCache must be non-nil. In
@@ -112,6 +128,7 @@ func New(opts Options) *Proxy {
 	}
 	p := &Proxy{
 		ready:                opts.Ready,
+		extraTunnelAddrs:     slices.Clone(opts.ExtraTunnelAddrs),
 		httpsAddr:            opts.HTTPSAddr,
 		tlsMode:              opts.TLSMode,
 		tunnelAddr:           opts.TunnelAddr,
@@ -149,13 +166,15 @@ func New(opts Options) *Proxy {
 	return p
 }
 
-// ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel listeners.
+// ListenAndServe starts the HTTP, HTTPS, and (optionally) tunnel listeners,
+// one for TunnelAddr and one for each of ExtraTunnelAddrs.
 // It blocks until any server has stopped.
 func (p *Proxy) ListenAndServe() error {
 	n := 2
 	if p.tunnelAddr != "" {
 		n = 3
 	}
+	n += len(p.extraTunnelAddrs)
 	errc := make(chan error, n)
 
 	go func() {
@@ -179,6 +198,11 @@ func (p *Proxy) ListenAndServe() error {
 	if p.tunnelAddr != "" {
 		go func() {
 			errc <- fmt.Errorf("tunnel: %w", p.listenTunnel())
+		}()
+	}
+	for _, addr := range p.extraTunnelAddrs {
+		go func() {
+			errc <- fmt.Errorf("tunnel: %w", p.listenExtraTunnel(addr))
 		}()
 	}
 
@@ -240,9 +264,15 @@ func (p *Proxy) Shutdown(ctx context.Context) error {
 
 	// Signal tunnel accept loop to stop, then close the listener.
 	close(p.tunnelDone)
+	p.tunnelMu.Lock()
+	p.tunnelClosed = true
 	if p.tunnelListener != nil {
 		p.tunnelListener.Close()
 	}
+	for _, ln := range p.extraTunnelListeners {
+		_ = ln.Close()
+	}
+	p.tunnelMu.Unlock()
 
 	if errHTTP != nil {
 		return errHTTP
