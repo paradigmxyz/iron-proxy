@@ -166,10 +166,44 @@ func TestDialControl_DenyAndAllow(t *testing.T) {
 		require.True(t, IsDenyError(err))
 	})
 
-	t.Run("malformed address allowed", func(t *testing.T) {
-		// Not our job to reject malformed addresses — Go's connect will fail.
-		require.NoError(t, g.DialControl("tcp", "not-an-address", nil))
+	t.Run("malformed address refused", func(t *testing.T) {
+		err := g.DialControl("tcp", "not-an-address", nil)
+		require.Error(t, err)
+		require.False(t, IsDenyError(err))
 	})
+}
+
+func TestDialControl_Zones(t *testing.T) {
+	g, err := New([]string{"127.0.0.0/8", "::1/128"})
+	require.NoError(t, err)
+
+	cases := []struct {
+		name    string
+		address string
+		denied  bool
+	}{
+		{name: "zoned ipv6 loopback", address: "[::1%x.allowed.example]:80", denied: true},
+		{name: "zoned 4-in-6 rendered as ipv4", address: "127.0.0.1%x.allowed.example:80", denied: true},
+		{name: "zoned 4-in-6 bracketed", address: "[::ffff:127.0.0.1%eth0]:80", denied: true},
+		{name: "zoned public ipv6", address: "[2001:db8::1%eth0]:80", denied: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := g.DialControl("tcp", tc.address, nil)
+			if tc.denied {
+				require.True(t, IsDenyError(err), "err=%v", err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestIsDenied_Zoned(t *testing.T) {
+	g, err := New([]string{"::1/128", "127.0.0.0/8"})
+	require.NoError(t, err)
+	require.True(t, g.IsDenied(netip.MustParseAddr("::1%eth0")))
+	require.True(t, g.IsDenied(netip.MustParseAddr("::ffff:127.0.0.1%eth0")))
 }
 
 func TestDialControl_EmptyGuardNoop(t *testing.T) {

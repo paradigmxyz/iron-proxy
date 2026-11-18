@@ -142,6 +142,15 @@ func TestCompile(t *testing.T) {
 		require.ErrorContains(t, err, "managed by the proxy")
 	})
 
+	t.Run("lexer setting name rejected", func(t *testing.T) {
+		for _, name := range []string{"standard_conforming_strings", "Client_Encoding"} {
+			u := upstream("a")
+			u.Settings = []Setting{{Name: name, Value: "x"}}
+			_, err := Compile(cfg(u), logger, stubSource)
+			require.ErrorContains(t, err, "managed by the proxy", name)
+		}
+	})
+
 	t.Run("duplicate setting name rejected", func(t *testing.T) {
 		u := upstream("a")
 		u.Settings = []Setting{

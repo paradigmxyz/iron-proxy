@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
@@ -91,7 +92,7 @@ func TestOTELAuditFunc_AllowedRequest(t *testing.T) {
 
 	// Verify request_transforms is a slice
 	transforms := attrs["request_transforms"]
-	require.Equal(t, log.KindSlice, transforms.Kind())
+	require.Equal(t, attribute.SLICE, transforms.Type())
 	transformSlice := transforms.AsSlice()
 	require.Len(t, transformSlice, 2)
 
@@ -106,18 +107,18 @@ func TestOTELAuditFunc_AllowedRequest(t *testing.T) {
 
 	// annotations should be a nested map, not a JSON string.
 	annotations := t1["annotations"]
-	require.Equal(t, log.KindMap, annotations.Kind())
+	require.Equal(t, attribute.MAP, annotations.Type())
 	annMap := mapFromValue(annotations)
 
 	swapped := annMap["swapped"]
-	require.Equal(t, log.KindSlice, swapped.Kind())
+	require.Equal(t, attribute.SLICE, swapped.Type())
 	swappedSlice := swapped.AsSlice()
 	require.Len(t, swappedSlice, 1)
 
 	entry := mapFromValue(swappedSlice[0])
 	assert.Equal(t, "OPENAI_API_KEY", entry["secret"].AsString())
 	locations := entry["locations"]
-	require.Equal(t, log.KindSlice, locations.Kind())
+	require.Equal(t, attribute.SLICE, locations.Type())
 	locSlice := locations.AsSlice()
 	require.Len(t, locSlice, 1)
 	assert.Equal(t, "header:Authorization", locSlice[0].AsString())
@@ -302,20 +303,20 @@ func TestChainAuditFuncs(t *testing.T) {
 }
 
 // recordAttrs extracts attributes from an OTEL log record into a map.
-func recordAttrs(rec sdklog.Record) map[string]log.Value {
-	attrs := make(map[string]log.Value)
-	rec.WalkAttributes(func(kv log.KeyValue) bool {
-		attrs[kv.Key] = kv.Value
+func recordAttrs(rec sdklog.Record) map[string]attribute.Value {
+	attrs := make(map[string]attribute.Value)
+	rec.WalkAttributes(func(kv attribute.KeyValue) bool {
+		attrs[string(kv.Key)] = kv.Value
 		return true
 	})
 	return attrs
 }
 
-// mapFromValue extracts key-value pairs from a Map log.Value.
-func mapFromValue(v log.Value) map[string]log.Value {
-	m := make(map[string]log.Value)
+// mapFromValue extracts key-value pairs from a Map attribute.Value.
+func mapFromValue(v attribute.Value) map[string]attribute.Value {
+	m := make(map[string]attribute.Value)
 	for _, kv := range v.AsMap() {
-		m[kv.Key] = kv.Value
+		m[string(kv.Key)] = kv.Value
 	}
 	return m
 }

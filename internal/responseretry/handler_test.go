@@ -616,7 +616,6 @@ func TestHandlerDialControlAllowsOnlyConfiguredPrivateCIDRs(t *testing.T) {
 		{name: "mapped configured service CIDR", address: "[::ffff:10.43.5.10]:8090", allowed: true},
 		{name: "configured IPv6 ULA", address: "[fd12:3456::10]:8090", allowed: true},
 		{name: "ordinary allowed address", address: "8.8.8.8:443", allowed: true},
-		{name: "malformed address deferred to dialer", address: "not-an-address", allowed: true},
 		{name: "different private CIDR", address: "10.42.5.10:8090", allowed: false},
 		{name: "IPv4 metadata", address: "169.254.169.254:80", allowed: false},
 		{name: "IPv6 metadata", address: "[fd00:ec2::254]:80", allowed: false},
@@ -634,6 +633,8 @@ func TestHandlerDialControlAllowsOnlyConfiguredPrivateCIDRs(t *testing.T) {
 			}
 		})
 	}
+
+	require.Error(t, control("tcp", "not-an-address", nil), "unparseable addresses must fail closed")
 
 	err = guard.DialControl("tcp", "10.43.5.10:8090", nil)
 	require.Error(t, err)
