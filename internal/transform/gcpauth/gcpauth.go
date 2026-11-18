@@ -112,7 +112,7 @@ func newFromConfig(c config, logger *slog.Logger, readFile func(string) ([]byte,
 	if hasProvider && c.Subject != "" {
 		return nil, fmt.Errorf("gcp_auth: \"subject\" cannot be combined with \"credentials_provider\" (only keyfile sources support domain-wide delegation)")
 	}
-	rules, err := hostmatch.CompileRules(c.Rules, "gcp_auth")
+	rules, err := hostmatch.CompileRulesAllowRequireTLS(c.Rules, "gcp_auth")
 	if err != nil {
 		return nil, err
 	}
