@@ -304,6 +304,63 @@ func TestParseInboundScope(t *testing.T) {
 	})
 }
 
+func TestTransformRequestURIPathEscaping(t *testing.T) {
+	creds := aws.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "example-secret"}
+	a := buildTransformWith(t, minimalYAML, mapBuilder(map[string]secrets.Source{
+		"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: creds.AccessKeyID},
+		"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: creds.SecretAccessKey},
+	}))
+	when := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+	a.now = func() time.Time { return when }
+	cases := []struct {
+		name, path string
+	}{
+		{"plain", "images/hero.png"},
+		{"at2x", "images/hero%402x.png"},
+		{"space", "images/hero%20large.png"},
+		{"unicode", "images/%E6%97%A5%E6%9C%AC%E8%AA%9E.png"},
+		{"percent", "images/100%25.png"},
+		{"literal escape", "images/hero%25402x.png"},
+		{"plus", "images/hero%2Blarge.png"},
+		{"hash", "images/hero%23large.png"},
+		{"question", "images/hero%3Flarge.png"},
+		{"escaped slash", "images/a%2Fb.png"},
+		{"repeated slash", "images//hero.png"},
+		{"dot segments", "images/../hero.png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Reuse the same transform across services to catch option leakage.
+			for _, endpoint := range []struct {
+				service, base string
+			}{
+				{"s3", "https://s3.us-east-1.amazonaws.com/bucket/"},
+				{"bedrock", "https://bedrock-runtime.us-east-1.amazonaws.com/model/"},
+				{"s3", "https://bucket.s3.us-east-1.amazonaws.com/"},
+			} {
+				for _, method := range []string{http.MethodPut, http.MethodHead, http.MethodGet} {
+					t.Run(endpoint.base+method, func(t *testing.T) {
+						rawURL := endpoint.base + tc.path + "?prefix=hello%20world%2B%25&x=1"
+						req := signedRequest(t, method, rawURL, "us-east-1", endpoint.service, nil, 1<<20)
+						expected, err := http.NewRequest(method, rawURL, nil)
+						require.NoError(t, err)
+						expected.Header.Set("X-Amz-Content-Sha256", emptyPayloadSHA256)
+						require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), creds, expected,
+							emptyPayloadSHA256, endpoint.service, "us-east-1", when, func(o *v4.SignerOptions) {
+								o.DisableURIPathEscaping = endpoint.service == "s3"
+							}))
+						res, err := a.TransformRequest(context.Background(), newContext(), req)
+						require.NoError(t, err)
+						require.Equal(t, transform.ActionContinue, res.Action)
+						require.Equal(t, rawURL, req.URL.String(), "signing must preserve object paths and queries")
+						require.Equal(t, expected.Header.Get("Authorization"), req.Header.Get("Authorization"))
+					})
+				}
+			}
+		})
+	}
+}
+
 func TestTransformRequest(t *testing.T) {
 	srcs := map[string]secrets.Source{
 		"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "AKIAEXAMPLE"},

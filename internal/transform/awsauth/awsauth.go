@@ -173,7 +173,11 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 		allowChunkedBody: c.AllowChunkedBody,
 		now:              time.Now,
 		sign: func(ctx context.Context, creds aws.Credentials, req *http.Request, payloadHash, service, region string, signingTime time.Time) error {
-			return signer.SignHTTP(ctx, creds, req, payloadHash, service, region, signingTime)
+			return signer.SignHTTP(ctx, creds, req, payloadHash, service, region, signingTime, func(options *v4.SignerOptions) {
+				// S3 signs the already-escaped object path without a second URI
+				// escape. Keep the default double escaping for other services.
+				options.DisableURIPathEscaping = service == "s3"
+			})
 		},
 	}, nil
 }
