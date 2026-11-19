@@ -27,6 +27,9 @@ const (
 	// RejectSetConfig — the client called set_config. Dynamic targets cannot be
 	// inspected safely, so all calls are rejected regardless of the GUC name.
 	RejectSetConfig
+	// RejectOpaqueSQLFunction — the client called a function that executes SQL
+	// the statement classifier cannot inspect.
+	RejectOpaqueSQLFunction
 	// RejectFunctionCall — the client used the legacy wire-level FunctionCall
 	// protocol, which invokes a function by OID without inspectable SQL text.
 	RejectFunctionCall
@@ -88,6 +91,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectClientRoleChange
 	case OpSetConfig:
 		return false, RejectSetConfig
+	case OpOpaqueSQLFunction:
+		return false, RejectOpaqueSQLFunction
 	case OpDoBlock:
 		// DO blocks contain opaque plpgsql we can't introspect from the SQL
 		// AST. Rather than risk an embedded role change slipping through,

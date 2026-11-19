@@ -400,6 +400,88 @@ func TestPostgresPolicy(t *testing.T) {
 		require.Equal(t, pgRole, currentRole(t, conn))
 	})
 
+	t.Run("SQL-executing functions cannot run hidden setting or role changes", func(t *testing.T) {
+		conn := dial(t, pgClientPassword)
+		for _, sql := range []string{
+			"SELECT query_to_xml('SELECT set_config(''app.tenant_label'', ''evil'', false)', true, false, '')",
+			"SELECT pg_catalog.query_to_xml('SELECT set_config(''role'', ''other_role'', false)', true, false, '')",
+			"SELECT query_to_xml_and_xmlschema('SELECT set_config(''app.tenant_label'', ''evil'', false)', true, false, '')",
+			"SELECT table_to_xml('pg_class'::regclass, true, false, '')",
+			"SELECT database_to_xml(true, false, '')",
+			"SELECT cursor_to_xml('missing'::refcursor, 10, true, false, '')",
+			"SELECT * FROM ts_stat('SELECT to_tsvector(set_config(''app.tenant_label'', ''evil'', false))')",
+			"SELECT ts_rewrite('foo'::tsquery, 'SELECT to_tsquery(set_config(''app.tenant_label'', ''evil'', false)), ''bar''::tsquery')",
+			"SELECT ts_rewrite('foo'::tsquery, 'foo'::tsquery, 'bar'::tsquery)",
+			"SELECT cron.schedule('* * * * *', 'SELECT 1')",
+			"SELECT pg_background_launch('SELECT 1')",
+		} {
+			err := exec(t, conn, sql)
+			require.Error(t, err)
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr))
+			require.Equal(t, "0A000", pgErr.Code)
+			results, err := conn.Exec(context.Background(), "SELECT current_role, current_setting('app.tenant_label')").ReadAll()
+			require.NoError(t, err)
+			require.Equal(t, pgRole, string(results[0].Rows[0][0]))
+			require.Equal(t, "centaur", string(results[0].Rows[0][1]))
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		client, err := pgx.Connect(ctx, connStr(pgClientPassword))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, client.Close(context.Background())) })
+		for _, tc := range []struct{ sql, arg string }{
+			{"SELECT query_to_xml($1, true, false, '')", "SELECT set_config('app.tenant_label', 'evil', false)"},
+			{"SELECT * FROM ts_stat($1)", "SELECT to_tsvector(set_config('app.tenant_label', 'evil', false))"},
+			{"SELECT ts_rewrite('foo'::tsquery, $1)", "SELECT to_tsquery(set_config('app.tenant_label', 'evil', false)), 'bar'::tsquery"},
+		} {
+			_, err = client.Exec(ctx, tc.sql, tc.arg)
+			require.Error(t, err)
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr))
+			require.Equal(t, "0A000", pgErr.Code)
+			var role, label string
+			require.NoError(t, client.QueryRow(ctx, "SELECT current_role, current_setting('app.tenant_label')").Scan(&role, &label))
+			require.Equal(t, pgRole, role)
+			require.Equal(t, "centaur", label)
+		}
+
+		var query string
+		require.NoError(t, client.QueryRow(ctx, "SELECT to_tsquery('foo')").Scan(&query))
+		require.Equal(t, "'foo'", query)
+	})
+
+	t.Run("optional extension functions cannot run hidden setting changes", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		admin, err := pgx.Connect(ctx, upstreamDSN)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, admin.Close(context.Background())) })
+		_, err = admin.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS tablefunc")
+		require.NoError(t, err)
+		_, err = admin.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS dblink")
+		require.NoError(t, err)
+
+		conn := dial(t, pgClientPassword)
+		for _, sql := range []string{
+			"SELECT * FROM crosstab('SELECT set_config(''app.tenant_label'', ''evil'', false), 1, ''x''') AS ct(rowid text, value text)",
+			"SELECT * FROM connectby('pg_class', 'set_config(''app.tenant_label'', ''evil'', false)', 'relnamespace::text', '11', 1) AS t(keyid text, parent_keyid text, level integer)",
+			"SELECT * FROM dblink('SELECT set_config(''app.tenant_label'', ''evil'', false)') AS t(value text)",
+			"SELECT dblink_exec('SELECT set_config(''app.tenant_label'', ''evil'', false)')",
+		} {
+			err := exec(t, conn, sql)
+			require.Error(t, err)
+			var pgErr *pgconn.PgError
+			require.True(t, errors.As(err, &pgErr))
+			require.Equal(t, "0A000", pgErr.Code)
+			results, err := conn.Exec(ctx, "SELECT current_role, current_setting('app.tenant_label')").ReadAll()
+			require.NoError(t, err)
+			require.Equal(t, pgRole, string(results[0].Rows[0][0]))
+			require.Equal(t, "centaur", string(results[0].Rows[0][1]))
+		}
+	})
+
 	t.Run("pg_settings writes are rejected", func(t *testing.T) {
 		// pg_settings' update rule calls set_config, and an auto-updatable
 		// view over it forwards updates, so both would bypass pinned settings.

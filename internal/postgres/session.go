@@ -494,6 +494,12 @@ func rejectError(reason RejectReason) *pgproto3.ErrorResponse {
 			Code:     "42501",
 			Message:  "blocked by iron-proxy policy: set_config is not supported because session settings are managed by the proxy",
 		}
+	case RejectOpaqueSQLFunction:
+		return &pgproto3.ErrorResponse{
+			Severity: "ERROR",
+			Code:     "0A000",
+			Message:  "blocked by iron-proxy policy: functions that execute uninspectable SQL are not supported",
+		}
 	case RejectSettingsCatalogWrite:
 		return &pgproto3.ErrorResponse{
 			Severity: "ERROR",
