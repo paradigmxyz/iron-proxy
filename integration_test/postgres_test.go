@@ -379,8 +379,14 @@ func TestPostgresPolicy(t *testing.T) {
 			"SELECT query_to_xml('SELECT set_config(''app.tenant_label'', ''evil'', false)', true, false, '')",
 			"SELECT pg_catalog.query_to_xml('SELECT set_config(''role'', ''other_role'', false)', true, false, '')",
 			"SELECT query_to_xml_and_xmlschema('SELECT set_config(''app.tenant_label'', ''evil'', false)', true, false, '')",
+			"SELECT table_to_xml('pg_class'::regclass, true, false, '')",
+			"SELECT database_to_xml(true, false, '')",
+			"SELECT cursor_to_xml('missing'::refcursor, 10, true, false, '')",
 			"SELECT * FROM ts_stat('SELECT to_tsvector(set_config(''app.tenant_label'', ''evil'', false))')",
 			"SELECT ts_rewrite('foo'::tsquery, 'SELECT to_tsquery(set_config(''app.tenant_label'', ''evil'', false)), ''bar''::tsquery')",
+			"SELECT ts_rewrite('foo'::tsquery, 'foo'::tsquery, 'bar'::tsquery)",
+			"SELECT cron.schedule('* * * * *', 'SELECT 1')",
+			"SELECT pg_background_launch('SELECT 1')",
 		} {
 			err := exec(t, conn, sql)
 			require.Error(t, err)
@@ -414,12 +420,12 @@ func TestPostgresPolicy(t *testing.T) {
 			require.Equal(t, "centaur", label)
 		}
 
-		var rewritten string
-		require.NoError(t, client.QueryRow(ctx, "SELECT ts_rewrite('foo'::tsquery, 'foo'::tsquery, 'bar'::tsquery)").Scan(&rewritten))
-		require.Equal(t, "'bar'", rewritten)
+		var query string
+		require.NoError(t, client.QueryRow(ctx, "SELECT to_tsquery('foo')").Scan(&query))
+		require.Equal(t, "'foo'", query)
 	})
 
-	t.Run("tablefunc functions cannot run hidden setting changes", func(t *testing.T) {
+	t.Run("optional extension functions cannot run hidden setting changes", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		admin, err := pgx.Connect(ctx, upstreamDSN)
@@ -427,11 +433,15 @@ func TestPostgresPolicy(t *testing.T) {
 		t.Cleanup(func() { require.NoError(t, admin.Close(context.Background())) })
 		_, err = admin.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS tablefunc")
 		require.NoError(t, err)
+		_, err = admin.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS dblink")
+		require.NoError(t, err)
 
 		conn := dial(t, pgClientPassword)
 		for _, sql := range []string{
 			"SELECT * FROM crosstab('SELECT set_config(''app.tenant_label'', ''evil'', false), 1, ''x''') AS ct(rowid text, value text)",
 			"SELECT * FROM connectby('pg_class', 'set_config(''app.tenant_label'', ''evil'', false)', 'relnamespace::text', '11', 1) AS t(keyid text, parent_keyid text, level integer)",
+			"SELECT * FROM dblink('SELECT set_config(''app.tenant_label'', ''evil'', false)') AS t(value text)",
+			"SELECT dblink_exec('SELECT set_config(''app.tenant_label'', ''evil'', false)')",
 		} {
 			err := exec(t, conn, sql)
 			require.Error(t, err)

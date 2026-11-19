@@ -17,8 +17,8 @@
 // While the relay is running the proxy is mostly transparent. It rejects
 // client-issued role-changing statements (`SET ROLE`, `RESET ROLE`,
 // `SET SESSION AUTHORIZATION`, `RESET SESSION AUTHORIZATION`) and their
-// function-call equivalents; all calls to `set_config`; functions that execute
-// or construct SQL from text; any `SET` or `RESET`
+// function-call equivalents; all calls to `set_config`; known functions that
+// may execute SQL outside the inspected statement; any `SET` or `RESET`
 // of a setting the upstream pins; the reset-everything statements
 // `RESET ALL` and `DISCARD ALL` (which would clear the managed role and pinned
 // settings); UPDATE or INSERT on pg_settings and view or rule definitions over

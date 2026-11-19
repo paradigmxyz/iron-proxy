@@ -73,9 +73,9 @@ const (
 	// or whether its target setting is a string literal. Dynamic targets cannot
 	// be proven safe at Parse time, so the policy rejects the function wholesale.
 	OpSetConfig
-	// OpOpaqueSQLFunction is a call to a function that executes SQL supplied as
-	// text or interpolates text into SQL. That SQL is opaque to the AST walker
-	// and may change the role or a pinned setting.
+	// OpOpaqueSQLFunction is a call to a function that may execute SQL outside
+	// the inspected statement. That SQL is opaque to the AST walker and may
+	// change the role or a pinned setting.
 	OpOpaqueSQLFunction
 	// OpUninspectableRoutine is a CREATE FUNCTION / CREATE PROCEDURE statement
 	// whose body cannot be inspected. Dynamic PL/pgSQL and unsupported languages
@@ -536,12 +536,20 @@ func setConfigTarget(fc *pg_query.FuncCall) (name string, ok bool) {
 
 func isOpaqueSQLFunction(fc *pg_query.FuncCall) bool {
 	name := strings.ToLower(functionName(fc))
+	// pg_cron functions can be reached without a schema qualifier through
+	// search_path, so the ambiguous names must also be denied.
 	switch name {
 	case "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema",
-		"ts_stat", "connectby":
+		"cursor_to_xml", "cursor_to_xmlschema",
+		"table_to_xml", "table_to_xmlschema", "table_to_xml_and_xmlschema",
+		"schema_to_xml", "schema_to_xmlschema", "schema_to_xml_and_xmlschema",
+		"database_to_xml", "database_to_xmlschema", "database_to_xml_and_xmlschema",
+		"ts_stat", "ts_rewrite", "connectby",
+		"schedule", "schedule_in_database", "alter_job", "run_job":
 		return true
-	case "ts_rewrite":
-		return len(fc.GetArgs()) == 2
+	}
+	if strings.HasPrefix(name, "dblink") || strings.HasPrefix(name, "pg_background_") {
+		return true
 	}
 	if !strings.HasPrefix(name, "crosstab") {
 		return false
