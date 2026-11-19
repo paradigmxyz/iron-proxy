@@ -73,6 +73,10 @@ const (
 	// or whether its target setting is a string literal. Dynamic targets cannot
 	// be proven safe at Parse time, so the policy rejects the function wholesale.
 	OpSetConfig
+	// OpXMLQuery is a call to an XML function that accepts SQL text. The SQL
+	// inside the argument is opaque to the AST walker and may change the role
+	// or a pinned setting when PostgreSQL executes it.
+	OpXMLQuery
 	// OpUninspectableRoutine is a CREATE FUNCTION / CREATE PROCEDURE statement
 	// whose body cannot be inspected. Dynamic PL/pgSQL and unsupported languages
 	// can hide role or GUC changes, so the policy rejects their definitions.
@@ -451,6 +455,8 @@ func scanMutations(node *pg_query.Node) mutations {
 				if m.kind == 0 {
 					m.kind = OpSetConfig
 				}
+			} else if isXMLQuery(n) && m.kind == 0 {
+				m.kind = OpXMLQuery
 			}
 		}
 		return true
@@ -514,20 +520,7 @@ func roleKindFor(name string, kind pg_query.VariableSetKind) OpKind {
 // literal, name is its lowercased value; dynamic targets return an empty name
 // with ok=true so the policy can still reject the call.
 func setConfigTarget(fc *pg_query.FuncCall) (name string, ok bool) {
-	names := fc.GetFuncname()
-	if len(names) == 0 {
-		return "", false
-	}
-	// Funcname is a list of String nodes: ["set_config"] for unqualified
-	// or ["pg_catalog", "set_config"] for schema-qualified. We accept any
-	// schema qualifier and trust that user-defined set_config functions
-	// are also suspicious — better a rare false positive than a bypass.
-	last := names[len(names)-1]
-	lastStr, isString := last.Node.(*pg_query.Node_String_)
-	if !isString {
-		return "", false
-	}
-	if !strings.EqualFold(lastStr.String_.GetSval(), "set_config") {
+	if !strings.EqualFold(functionName(fc), "set_config") {
 		return "", false
 	}
 	args := fc.GetArgs()
@@ -539,6 +532,29 @@ func setConfigTarget(fc *pg_query.FuncCall) (name string, ok bool) {
 		return "", true
 	}
 	return strings.ToLower(param), true
+}
+
+func isXMLQuery(fc *pg_query.FuncCall) bool {
+	switch strings.ToLower(functionName(fc)) {
+	case "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema":
+		return true
+	}
+	return false
+}
+
+func functionName(fc *pg_query.FuncCall) string {
+	names := fc.GetFuncname()
+	if len(names) == 0 {
+		return ""
+	}
+	// Funcname is a list of String nodes. The final node names the function,
+	// whether or not the call is schema-qualified.
+	last := names[len(names)-1]
+	lastStr, isString := last.Node.(*pg_query.Node_String_)
+	if !isString {
+		return ""
+	}
+	return lastStr.String_.GetSval()
 }
 
 // stringConst returns the string value of node if it's an A_Const with a

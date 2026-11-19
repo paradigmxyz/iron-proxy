@@ -73,6 +73,14 @@ func TestClassify(t *testing.T) {
 		{name: "set_config cast target", sql: "SELECT set_config('role'::text, 'admin', false)", want: OpSetConfig},
 		{name: "set_config computed target", sql: "SELECT set_config(concat('ro', 'le'), 'admin', false)", want: OpSetConfig},
 		{name: "current_setting role is read only", sql: "SELECT current_setting('role')", want: OpOther},
+		{name: "query_to_xml hides setting change", sql: "SELECT query_to_xml('SELECT set_config(''app.tenant_label'', ''evil'', false)', true, false, '')", want: OpXMLQuery},
+		{name: "qualified query_to_xml hides role change", sql: "SELECT pg_catalog.query_to_xml('SELECT set_config(''role'', ''admin'', false)', true, false, '')", want: OpXMLQuery},
+		{name: "query_to_xml dynamic SQL", sql: "SELECT query_to_xml($1, true, false, '')", want: OpXMLQuery},
+		{name: "query_to_xmlschema SQL text", sql: "SELECT query_to_xmlschema('SELECT 1', true, false, '')", want: OpXMLQuery},
+		{name: "query_to_xml_and_xmlschema SQL text", sql: "SELECT query_to_xml_and_xmlschema('SELECT 1', true, false, '')", want: OpXMLQuery},
+		{name: "query_to_xml in batch", sql: "SELECT 1; SELECT query_to_xml('SELECT 1', true, false, '')", want: OpXMLQuery},
+		{name: "query_to_xml in prepared statement", sql: "PREPARE p AS SELECT query_to_xml('SELECT 1', true, false, '')", want: OpXMLQuery},
+		{name: "table_to_xml allowed", sql: "SELECT table_to_xml('pg_class'::regclass, true, false, '')", want: OpOther},
 
 		// PREPARE wrapping a SELECT that calls set_config — caught by the
 		// walker through the nested SelectStmt.
