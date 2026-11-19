@@ -73,10 +73,10 @@ const (
 	// or whether its target setting is a string literal. Dynamic targets cannot
 	// be proven safe at Parse time, so the policy rejects the function wholesale.
 	OpSetConfig
-	// OpXMLQuery is a call to an XML function that accepts SQL text. The SQL
-	// inside the argument is opaque to the AST walker and may change the role
-	// or a pinned setting when PostgreSQL executes it.
-	OpXMLQuery
+	// OpOpaqueSQLFunction is a call to a function that executes SQL supplied as
+	// text or interpolates text into SQL. That SQL is opaque to the AST walker
+	// and may change the role or a pinned setting.
+	OpOpaqueSQLFunction
 	// OpUninspectableRoutine is a CREATE FUNCTION / CREATE PROCEDURE statement
 	// whose body cannot be inspected. Dynamic PL/pgSQL and unsupported languages
 	// can hide role or GUC changes, so the policy rejects their definitions.
@@ -455,8 +455,8 @@ func scanMutations(node *pg_query.Node) mutations {
 				if m.kind == 0 {
 					m.kind = OpSetConfig
 				}
-			} else if isXMLQuery(n) && m.kind == 0 {
-				m.kind = OpXMLQuery
+			} else if isOpaqueSQLFunction(n) && m.kind == 0 {
+				m.kind = OpOpaqueSQLFunction
 			}
 		}
 		return true
@@ -534,12 +534,24 @@ func setConfigTarget(fc *pg_query.FuncCall) (name string, ok bool) {
 	return strings.ToLower(param), true
 }
 
-func isXMLQuery(fc *pg_query.FuncCall) bool {
-	switch strings.ToLower(functionName(fc)) {
-	case "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema":
+func isOpaqueSQLFunction(fc *pg_query.FuncCall) bool {
+	name := strings.ToLower(functionName(fc))
+	switch name {
+	case "query_to_xml", "query_to_xmlschema", "query_to_xml_and_xmlschema",
+		"ts_stat", "connectby":
 		return true
+	case "ts_rewrite":
+		return len(fc.GetArgs()) == 2
 	}
-	return false
+	if !strings.HasPrefix(name, "crosstab") {
+		return false
+	}
+	for _, digit := range strings.TrimPrefix(name, "crosstab") {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func functionName(fc *pg_query.FuncCall) string {

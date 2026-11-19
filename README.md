@@ -48,7 +48,8 @@ Single binary. Single YAML config.
 - **PostgreSQL MITM proxy.** Optional listener that authenticates clients
   against proxy-managed credentials, injects `SET ROLE` on the upstream
   session, and rejects client attempts to mutate the role (`SET ROLE`,
-  any `set_config` call, XML functions that accept SQL text, DO blocks,
+  any `set_config` call, functions that execute or construct SQL from text,
+  DO blocks,
   unsafe function definitions, definitions that bind functions as callbacks
   such as `CREATE AGGREGATE`, etc.) via a
   SQL AST walk. SQL and PL/pgSQL routine bodies are inspected recursively;
