@@ -517,6 +517,78 @@ tokens:
 	require.Equal(t, 1, srv.Calls(), "concurrent requests must single-flight the exchange")
 }
 
+// The cached token source outlives the request that built it. Once that
+// request's context is canceled, later refreshes must still reach the token
+// endpoint instead of failing with "context canceled".
+func TestRefreshAfterFirstRequestContextCanceled(t *testing.T) {
+	sources := map[string]secrets.Source{
+		"RT":      &staticSource{name: "rt", value: "test-refresh-token"},
+		"CID":     &staticSource{name: "cid", value: "test-client-id"},
+		"CSECRET": &staticSource{name: "cs", value: "test-client-secret"},
+		"TENANT":  &staticSource{name: "t", value: "acme"},
+	}
+	cases := []struct {
+		name  string
+		entry string
+	}{
+		{
+			name: "refresh_token",
+			entry: `
+  - grant: refresh_token
+    refresh_token: {type: env, var: RT}
+    client_id:     {type: env, var: CID}`,
+		},
+		{
+			name: "client_credentials",
+			entry: `
+  - grant: client_credentials
+    client_id:     {type: env, var: CID}
+    client_secret: {type: env, var: CSECRET}`,
+		},
+		{
+			name: "client_credentials with token endpoint headers",
+			entry: `
+  - grant: client_credentials
+    client_id:     {type: env, var: CID}
+    client_secret: {type: env, var: CSECRET}
+    token_endpoint_headers:
+      x-tenant: {type: env, var: TENANT}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// expires_in 1 is inside oauth2's 10s expiry delta, so every request refreshes.
+			srv := newTokenServer(t, func(url.Values) (int, map[string]any) {
+				return http.StatusOK, map[string]any{
+					"access_token": "minted-token",
+					"token_type":   "Bearer",
+					"expires_in":   1,
+				}
+			})
+			o := buildTransformWith(t, "tokens:"+tc.entry+`
+    token_endpoint: "`+srv.URL+`/token"
+    require: true
+    rules:
+      - host: "api.example.com"
+`, mapBuilder(sources))
+
+			first, cancel := context.WithCancel(context.Background())
+			req := newRequest(t, http.MethodGet, "https://api.example.com/v1/x")
+			res, err := o.TransformRequest(first, newContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionContinue, res.Action)
+			cancel()
+
+			req = newRequest(t, http.MethodGet, "https://api.example.com/v1/x")
+			res, err = o.TransformRequest(context.Background(), newContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionContinue, res.Action)
+			require.Equal(t, "Bearer minted-token", req.Header.Get("Authorization"))
+			require.Equal(t, 2, srv.Calls(), "the expired token must be refreshed")
+		})
+	}
+}
+
 func TestNoMatchingEntryPassesThrough(t *testing.T) {
 	srv := newTokenServer(t, nil)
 	o := buildTransformWith(t, `
