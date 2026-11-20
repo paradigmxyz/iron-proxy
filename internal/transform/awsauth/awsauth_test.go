@@ -518,3 +518,57 @@ func sha256Hex(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
+
+func TestHopByHopHeadersAreNotSigned(t *testing.T) {
+	srcs := map[string]secrets.Source{
+		"AWS_ACCESS_KEY_ID":     &staticSource{name: "access", value: "AKIAEXAMPLE"},
+		"AWS_SECRET_ACCESS_KEY": &staticSource{name: "secret", value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"},
+	}
+	cases := []struct {
+		name    string
+		headers map[string]string
+		gone    []string
+		kept    []string
+	}{
+		{
+			name:    "connection close, as python's urllib sends it",
+			headers: map[string]string{"Connection": "close"},
+			gone:    []string{"connection"},
+		},
+		{
+			name:    "headers the connection header names",
+			headers: map[string]string{"Connection": "keep-alive, X-Hop", "Keep-Alive": "timeout=5", "X-Hop": "1"},
+			gone:    []string{"connection", "keep-alive", "x-hop"},
+		},
+		{
+			name:    "end-to-end headers stay signed",
+			headers: map[string]string{"Connection": "close", "X-Amz-Meta-Note": "kept", "Content-Type": "text/plain"},
+			gone:    []string{"connection"},
+			kept:    []string{"x-amz-meta-note", "content-type"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := buildTransformWith(t, minimalYAML, mapBuilder(srcs))
+			req := signedRequest(t, http.MethodPut, "https://bucket.s3.us-east-1.amazonaws.com/key", "us-east-1", "s3", []byte("x"), 1<<20)
+			for k, v := range tc.headers {
+				req.Header.Set(k, v)
+			}
+			res, err := a.TransformRequest(context.Background(), newContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionContinue, res.Action)
+
+			auth := req.Header.Get("Authorization")
+			i := strings.Index(auth, "SignedHeaders=")
+			require.GreaterOrEqual(t, i, 0, "Authorization header = %q", auth)
+			signed := strings.Split(strings.SplitN(auth[i+len("SignedHeaders="):], ",", 2)[0], ";")
+			for _, h := range tc.gone {
+				require.Empty(t, req.Header.Get(h), "%s must not be forwarded", h)
+				require.NotContains(t, signed, h, "%s must not be signed", h)
+			}
+			for _, h := range tc.kept {
+				require.Contains(t, signed, h)
+			}
+		})
+	}
+}

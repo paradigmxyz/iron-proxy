@@ -33,6 +33,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -279,6 +280,10 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 	// Strip the inbound placeholder signature so SignHTTP produces a fresh,
 	// untainted signature using only the headers we want signed.
 	stripInboundSignatureHeaders(req)
+	// Hop-by-hop headers never reach the upstream (the outbound transport
+	// drops them), so signing them would produce a signature the upstream
+	// cannot verify.
+	stripHopByHopHeaders(req)
 	// X-Amz-Content-Sha256 is required by S3 and signed when present; setting
 	// it explicitly makes the signed canonical request deterministic across
 	// services.
@@ -369,6 +374,39 @@ func stripInboundSignatureHeaders(req *http.Request) {
 	req.Header.Del("X-Amz-Date")
 	req.Header.Del("X-Amz-Security-Token")
 	req.Header.Del("X-Amz-Content-Sha256")
+}
+
+// hopByHopHeaders are the RFC 9110 section 7.6.1 connection-specific headers,
+// plus the legacy ones Go's reverse proxy also removes. They describe this hop
+// only and are not forwarded upstream.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// stripHopByHopHeaders removes the headers that will not reach the upstream:
+// every header the Connection header names, then the hop-by-hop set. A client
+// that sends "Connection: close" (Python's urllib always does) would otherwise
+// have it signed, dropped on the way out, and the request refused with
+// SignatureDoesNotMatch.
+func stripHopByHopHeaders(req *http.Request) {
+	for _, value := range req.Header.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			if name = textproto.TrimString(name); name != "" {
+				req.Header.Del(name)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		req.Header.Del(name)
+	}
 }
 
 // payloadHash returns the SHA-256 hex hash of the request body, or the
