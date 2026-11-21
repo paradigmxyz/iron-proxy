@@ -71,6 +71,13 @@ func newContext() *transform.TransformContext {
 // is expected to strip this placeholder signature and re-sign.
 func signedRequest(t *testing.T, method, rawURL, region, service string, body []byte, maxBytes int64) *http.Request {
 	t.Helper()
+	return signedRequestWithKey(t, "AKIAIOSFODNN7EXAMPLE", method, rawURL, region, service, body, maxBytes)
+}
+
+// signedRequestWithKey is signedRequest with a caller-chosen placeholder
+// access key id.
+func signedRequestWithKey(t *testing.T, accessKeyID, method, rawURL, region, service string, body []byte, maxBytes int64) *http.Request {
+	t.Helper()
 	var bodyReader io.Reader = http.NoBody
 	if body != nil {
 		bodyReader = bytes.NewReader(body)
@@ -90,7 +97,7 @@ func signedRequest(t *testing.T, method, rawURL, region, service string, body []
 	}
 	signer := v4.NewSigner()
 	creds := aws.Credentials{
-		AccessKeyID:     "AKIAIOSFODNN7EXAMPLE",
+		AccessKeyID:     accessKeyID,
 		SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 	}
 	require.NoError(t, signer.SignHTTP(context.Background(), creds, req, hash, service, region, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)))
@@ -512,6 +519,232 @@ rules:
 		require.Equal(t, transform.ActionReject, res.Action)
 		require.Equal(t, http.StatusBadGateway, res.Response.StatusCode)
 	})
+}
+
+func TestStaticSessionToken(t *testing.T) {
+	const cfg = `
+access_key_id:     {type: env, var: AK}
+secret_access_key: {type: env, var: SK}
+session_token:     {type: env, var: ST}
+rules:
+  - host: "*.amazonaws.com"
+`
+	signingTime := time.Date(2025, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	t.Run("signs with the session token and sets X-Amz-Security-Token", func(t *testing.T) {
+		srcs := map[string]secrets.Source{
+			"AK": &staticSource{name: "ak", value: "ASIAEXAMPLE"},
+			"SK": &staticSource{name: "sk", value: "secret-example"},
+			"ST": &staticSource{name: "st", value: "token-example"},
+		}
+		a := buildTransformWith(t, cfg, mapBuilder(srcs))
+		a.now = func() time.Time { return signingTime }
+
+		req := signedRequest(t, http.MethodGet, "https://ec2.ap-southeast-1.amazonaws.com/?Action=DescribeInstances&Version=2016-11-15", "ap-southeast-1", "ec2", nil, 1<<20)
+		res, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, transform.ActionContinue, res.Action)
+		require.Equal(t, "token-example", req.Header.Get("X-Amz-Security-Token"))
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=ASIAEXAMPLE/20250102/ap-southeast-1/ec2/aws4_request")
+		require.Contains(t, req.Header.Get("Authorization"), "x-amz-security-token")
+
+		// The signature must be the one the SDK computes for these credentials.
+		want := req.Clone(context.Background())
+		stripInboundSignatureHeaders(want)
+		want.Header.Set("X-Amz-Content-Sha256", emptyPayloadSHA256)
+		require.NoError(t, v4.NewSigner().SignHTTP(context.Background(), aws.Credentials{
+			AccessKeyID: "ASIAEXAMPLE", SecretAccessKey: "secret-example", SessionToken: "token-example",
+		}, want, emptyPayloadSHA256, "ec2", "ap-southeast-1", signingTime))
+		require.Equal(t, want.Header.Get("Authorization"), req.Header.Get("Authorization"))
+	})
+
+	t.Run("session token failure rejects the request", func(t *testing.T) {
+		srcs := map[string]secrets.Source{
+			"AK": &staticSource{name: "ak", value: "ASIAEXAMPLE"},
+			"SK": &staticSource{name: "sk", value: "secret-example"},
+			"ST": &staticSource{name: "st", err: fmt.Errorf("file missing")},
+		}
+		a := buildTransformWith(t, cfg, mapBuilder(srcs))
+		req := signedRequest(t, http.MethodGet, "https://sts.amazonaws.com/", "us-east-1", "sts", nil, 1<<20)
+		res, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, transform.ActionReject, res.Action)
+		require.Equal(t, http.StatusBadGateway, res.Response.StatusCode)
+	})
+
+	t.Run("empty session token rejects the request", func(t *testing.T) {
+		srcs := map[string]secrets.Source{
+			"AK": &staticSource{name: "ak", value: "ASIAEXAMPLE"},
+			"SK": &staticSource{name: "sk", value: "secret-example"},
+			"ST": &staticSource{name: "st", value: ""},
+		}
+		a := buildTransformWith(t, cfg, mapBuilder(srcs))
+		req := signedRequest(t, http.MethodGet, "https://sts.amazonaws.com/", "us-east-1", "sts", nil, 1<<20)
+		res, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, transform.ActionReject, res.Action)
+		require.Equal(t, http.StatusBadGateway, res.Response.StatusCode)
+	})
+
+	t.Run("session_token alone is a config error", func(t *testing.T) {
+		var c config
+		node := yamlFromString(t, `
+session_token: {type: env, var: ST}
+rules:
+  - host: "*.amazonaws.com"
+`)
+		require.NoError(t, node.Decode(&c))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(nil), errCredBuilder)
+		require.ErrorContains(t, err, "access_key_id is required")
+	})
+
+	t.Run("session_token with credentials_provider is a config error", func(t *testing.T) {
+		var c config
+		node := yamlFromString(t, `
+session_token: {type: env, var: ST}
+credentials_provider: {type: workload_identity}
+rules:
+  - host: "*.amazonaws.com"
+`)
+		require.NoError(t, node.Decode(&c))
+		_, err := newFromConfig(c, slog.Default(), mapBuilder(nil), errCredBuilder)
+		require.ErrorContains(t, err, "not both")
+	})
+}
+
+func TestInboundAccessKeyID(t *testing.T) {
+	entry := func(t *testing.T, inbound, ak string) *AWSAuth {
+		t.Helper()
+		srcs := map[string]secrets.Source{
+			"AK": &staticSource{name: "ak", value: ak},
+			"SK": &staticSource{name: "sk", value: "secret-" + ak},
+		}
+		return buildTransformWith(t, fmt.Sprintf(`
+access_key_id:     {type: env, var: AK}
+secret_access_key: {type: env, var: SK}
+inbound_access_key_id: %q
+rules:
+  - host: "*.amazonaws.com"
+`, inbound), mapBuilder(srcs))
+	}
+	// run applies the entries in order, like the transform pipeline does.
+	run := func(t *testing.T, req *http.Request, entries ...*AWSAuth) {
+		t.Helper()
+		for _, e := range entries {
+			res, err := e.TransformRequest(context.Background(), newContext(), req)
+			require.NoError(t, err)
+			require.Equal(t, transform.ActionContinue, res.Action)
+		}
+	}
+	const url = "https://route53.amazonaws.com/2013-04-01/hostedzone"
+
+	t.Run("each placeholder key selects its own entry", func(t *testing.T) {
+		a := entry(t, "PLACEHOLDERA", "AKIAACCOUNTA")
+		b := entry(t, "PLACEHOLDERB", "AKIAACCOUNTB")
+
+		req := signedRequestWithKey(t, "PLACEHOLDERB", http.MethodGet, url, "us-east-1", "route53", nil, 1<<20)
+		run(t, req, a, b)
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=AKIAACCOUNTB/")
+
+		req = signedRequestWithKey(t, "PLACEHOLDERA", http.MethodGet, url, "us-east-1", "route53", nil, 1<<20)
+		run(t, req, a, b)
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=AKIAACCOUNTA/")
+	})
+
+	t.Run("a later catch-all entry re-signs", func(t *testing.T) {
+		a := entry(t, "PLACEHOLDERA", "AKIAACCOUNTA")
+		catchAll := entry(t, "", "AKIACATCHALL")
+
+		req := signedRequestWithKey(t, "PLACEHOLDERA", http.MethodGet, url, "us-east-1", "route53", nil, 1<<20)
+		run(t, req, a, catchAll)
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=AKIACATCHALL/")
+	})
+
+	t.Run("an unknown placeholder key is left unsigned", func(t *testing.T) {
+		a := entry(t, "PLACEHOLDERA", "AKIAACCOUNTA")
+		req := signedRequestWithKey(t, "SOMEOTHERKEY", http.MethodGet, url, "us-east-1", "route53", nil, 1<<20)
+		before := req.Header.Get("Authorization")
+		tctx := newContext()
+		res, err := a.TransformRequest(context.Background(), tctx, req)
+		require.NoError(t, err)
+		require.Equal(t, transform.ActionContinue, res.Action)
+		require.Equal(t, before, req.Header.Get("Authorization"))
+		require.Equal(t, "inbound_access_key_id_mismatch", tctx.DrainAnnotations()["skipped"])
+	})
+
+	t.Run("a mismatched key skips the region and service gates", func(t *testing.T) {
+		srcs := map[string]secrets.Source{
+			"AK": &staticSource{name: "ak", value: "AKIAACCOUNTA"},
+			"SK": &staticSource{name: "sk", value: "secret"},
+		}
+		a := buildTransformWith(t, `
+access_key_id:     {type: env, var: AK}
+secret_access_key: {type: env, var: SK}
+inbound_access_key_id: PLACEHOLDERA
+allowed_regions:  ["eu-west-1"]
+allowed_services: ["s3"]
+rules:
+  - host: "*.amazonaws.com"
+`, mapBuilder(srcs))
+		req := signedRequestWithKey(t, "PLACEHOLDERB", http.MethodGet, url, "us-east-1", "route53", nil, 1<<20)
+		run(t, req, a)
+	})
+
+	presigned := func(t *testing.T, key string) *http.Request {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, "https://bucket.s3.us-east-1.amazonaws.com/k?X-Amz-Credential="+key+"%2F20250102%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Signature=abc", nil)
+		require.NoError(t, err)
+		req.Body = transform.NewBufferedBody(http.NoBody, 1<<20)
+		return req
+	}
+
+	t.Run("signs a pre-signed URL made with its key", func(t *testing.T) {
+		req := presigned(t, "PLACEHOLDERA")
+		run(t, req, entry(t, "PLACEHOLDERA", "AKIAACCOUNTA"))
+		require.Contains(t, req.Header.Get("Authorization"), "Credential=AKIAACCOUNTA/")
+	})
+
+	t.Run("skips a pre-signed URL made with another key", func(t *testing.T) {
+		req := presigned(t, "PLACEHOLDERB")
+		run(t, req, entry(t, "PLACEHOLDERA", "AKIAACCOUNTA"))
+		require.Empty(t, req.Header.Get("Authorization"))
+	})
+
+	t.Run("still rejects a request with no signature", func(t *testing.T) {
+		a := entry(t, "PLACEHOLDERA", "AKIAACCOUNTA")
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		require.NoError(t, err)
+		req.Body = transform.NewBufferedBody(http.NoBody, 1<<20)
+		res, err := a.TransformRequest(context.Background(), newContext(), req)
+		require.NoError(t, err)
+		require.Equal(t, transform.ActionReject, res.Action)
+	})
+
+	t.Run("rejects a value that cannot be an access key id", func(t *testing.T) {
+		for _, v := range []string{"a/b", "a b", "a,b", "a=b"} {
+			var c config
+			node := yamlFromString(t, fmt.Sprintf(`
+access_key_id:     {type: env, var: AK}
+secret_access_key: {type: env, var: SK}
+inbound_access_key_id: %q
+rules:
+  - host: "*.amazonaws.com"
+`, v))
+			require.NoError(t, node.Decode(&c))
+			srcs := map[string]secrets.Source{"AK": &staticSource{}, "SK": &staticSource{}}
+			_, err := newFromConfig(c, slog.Default(), mapBuilder(srcs), errCredBuilder)
+			require.ErrorContains(t, err, "inbound_access_key_id", v)
+		}
+	})
+}
+
+func TestParseInboundScopeAccessKeyID(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://example.com/", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=PLACEHOLDER/20250102/us-east-1/ec2/aws4_request, SignedHeaders=host, Signature=abc")
+	scope, err := parseInboundScope(req)
+	require.NoError(t, err)
+	require.Equal(t, "PLACEHOLDER", scope.accessKeyID)
 }
 
 func sha256Hex(b []byte) string {
