@@ -536,6 +536,7 @@ transforms:
   #   config:
   #     access_key_id:     {type: env, var: AWS_ACCESS_KEY_ID}
   #     secret_access_key: {type: env, var: AWS_SECRET_ACCESS_KEY}
+  #     # session_token:   {type: env, var: AWS_SESSION_TOKEN}   # for temporary (STS) credentials
   #     # allowed_regions:  ["us-east-1", "eu-west-1"]           # optional safety gate; default allows any region
   #     # allowed_services: ["bedrock", "s3", "dynamodb"]        # optional safety gate; default allows any service
   #     # unsigned_payload: false
@@ -554,6 +555,30 @@ transforms:
   #       type: workload_identity
   #       # region: us-east-1     # optional; overrides AWS_REGION discovery
   #     allowed_services: ["bedrock"]
+  #     rules:
+  #       - host: "*.amazonaws.com"
+  #
+  # Several accounts on the same hosts: give each entry an inbound_access_key_id.
+  # An entry signs only requests the agent signed with that placeholder key, so
+  # the agent picks the account by its AWS profile. This selects an account, it
+  # does not restrict one: any agent behind the proxy can use any listed key.
+  # Put these entries before any entry without inbound_access_key_id, which
+  # would sign everything. When rotating file-based credentials, write the
+  # three files and call /v1/reload so they are picked up together.
+  # - name: aws_auth
+  #   config:
+  #     inbound_access_key_id: "PLACEHOLDER_PROD"
+  #     access_key_id:     {type: file, path: /secrets/prod/access_key_id}
+  #     secret_access_key: {type: file, path: /secrets/prod/secret_access_key}
+  #     session_token:     {type: file, path: /secrets/prod/session_token}
+  #     rules:
+  #       - host: "*.amazonaws.com"
+  # - name: aws_auth
+  #   config:
+  #     inbound_access_key_id: "PLACEHOLDER_DEV"
+  #     access_key_id:     {type: file, path: /secrets/dev/access_key_id}
+  #     secret_access_key: {type: file, path: /secrets/dev/secret_access_key}
+  #     session_token:     {type: file, path: /secrets/dev/session_token}
   #     rules:
   #       - host: "*.amazonaws.com"
 

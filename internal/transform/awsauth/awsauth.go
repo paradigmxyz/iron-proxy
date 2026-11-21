@@ -66,7 +66,9 @@ const (
 type config struct {
 	AccessKeyID         yaml.Node              `yaml:"access_key_id,omitempty"`
 	SecretAccessKey     yaml.Node              `yaml:"secret_access_key,omitempty"`
+	SessionToken        yaml.Node              `yaml:"session_token,omitempty"`
 	CredentialsProvider yaml.Node              `yaml:"credentials_provider,omitempty"`
+	InboundAccessKeyID  string                 `yaml:"inbound_access_key_id,omitempty"`
 	AllowedRegions      []string               `yaml:"allowed_regions,omitempty"`
 	AllowedServices     []string               `yaml:"allowed_services,omitempty"`
 	UnsignedPayload     bool                   `yaml:"unsigned_payload,omitempty"`
@@ -93,6 +95,7 @@ const (
 type AWSAuth struct {
 	logger           *slog.Logger
 	rules            []hostmatch.Rule
+	inboundKeyID     string              // "" → sign any inbound access key id
 	allowedRegions   map[string]struct{} // nil → allow any
 	allowedServices  map[string]struct{} // nil → allow any
 	creds            aws.CredentialsProvider
@@ -120,7 +123,7 @@ func factory(cfg yaml.Node, logger *slog.Logger) (transform.Transformer, error) 
 }
 
 func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCreds credentialsProviderBuilder) (*AWSAuth, error) {
-	hasStatic := !c.AccessKeyID.IsZero() || !c.SecretAccessKey.IsZero()
+	hasStatic := !c.AccessKeyID.IsZero() || !c.SecretAccessKey.IsZero() || !c.SessionToken.IsZero()
 	hasProvider := !c.CredentialsProvider.IsZero()
 	if hasStatic && hasProvider {
 		return nil, fmt.Errorf("aws_auth: set either access_key_id/secret_access_key or credentials_provider, not both")
@@ -151,7 +154,17 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 		if err != nil {
 			return nil, fmt.Errorf("aws_auth: building secret_access_key source: %w", err)
 		}
-		creds = &staticSourceProvider{accessKey: accessKey, secretKey: secretKey}
+		p := &staticSourceProvider{accessKey: accessKey, secretKey: secretKey}
+		if !c.SessionToken.IsZero() {
+			p.sessionToken, err = build(c.SessionToken, logger)
+			if err != nil {
+				return nil, fmt.Errorf("aws_auth: building session_token source: %w", err)
+			}
+		}
+		creds = p
+	}
+	if strings.ContainsAny(c.InboundAccessKeyID, "/ ,=") {
+		return nil, fmt.Errorf("aws_auth: inbound_access_key_id %q contains a character that cannot appear in an access key id", c.InboundAccessKeyID)
 	}
 
 	rules, err := hostmatch.CompileRulesAllowRequireTLS(c.Rules, "aws_auth")
@@ -166,6 +179,7 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 	return &AWSAuth{
 		logger:           logger,
 		rules:            rules,
+		inboundKeyID:     c.InboundAccessKeyID,
 		allowedRegions:   buildAllowSet(c.AllowedRegions),
 		allowedServices:  buildAllowSet(c.AllowedServices),
 		creds:            creds,
@@ -178,11 +192,12 @@ func newFromConfig(c config, logger *slog.Logger, build sourceBuilder, buildCred
 	}, nil
 }
 
-// staticSourceProvider adapts two secrets.Source values into an
+// staticSourceProvider adapts secrets.Source values into an
 // aws.CredentialsProvider. The sources do their own TTL caching.
 type staticSourceProvider struct {
-	accessKey secrets.Source
-	secretKey secrets.Source
+	accessKey    secrets.Source
+	secretKey    secrets.Source
+	sessionToken secrets.Source // optional, for temporary credentials
 }
 
 func (p *staticSourceProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
@@ -194,9 +209,19 @@ func (p *staticSourceProvider) Retrieve(ctx context.Context) (aws.Credentials, e
 	if err != nil {
 		return aws.Credentials{}, fmt.Errorf("secret_access_key: %w", err)
 	}
+	var st string
+	if p.sessionToken != nil {
+		if st, err = p.sessionToken.Get(ctx); err != nil {
+			return aws.Credentials{}, fmt.Errorf("session_token: %w", err)
+		}
+		if st == "" {
+			return aws.Credentials{}, errors.New("session_token: empty value")
+		}
+	}
 	return aws.Credentials{
 		AccessKeyID:     ak,
 		SecretAccessKey: sk,
+		SessionToken:    st,
 		Source:          "iron-proxy aws_auth static",
 	}, nil
 }
@@ -243,6 +268,12 @@ func (a *AWSAuth) TransformRequest(ctx context.Context, tctx *transform.Transfor
 			Action:   transform.ActionReject,
 			Response: errorResponse(req, http.StatusBadRequest, "missing_sigv4"),
 		}, nil
+	}
+
+	// Entries with inbound_access_key_id only sign requests made with that key.
+	if a.inboundKeyID != "" && scope.accessKeyID != a.inboundKeyID {
+		tctx.Annotate("skipped", "inbound_access_key_id_mismatch")
+		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 
 	if a.allowedRegions != nil {
@@ -307,11 +338,12 @@ func (a *AWSAuth) TransformResponse(context.Context, *transform.TransformContext
 	return &transform.TransformResult{Action: transform.ActionContinue}, nil
 }
 
-// credentialScope is the (region, service) pair extracted from an inbound
-// SigV4 signature.
+// credentialScope is the access key id and (region, service) pair extracted
+// from an inbound SigV4 signature.
 type credentialScope struct {
-	region  string
-	service string
+	accessKeyID string
+	region      string
+	service     string
 }
 
 var errNoSigV4 = errors.New("request has no SigV4 signature (no Authorization header or X-Amz-Credential query param)")
@@ -357,7 +389,7 @@ func parseCredentialPath(cred string) (credentialScope, error) {
 	if parts[2] == "" || parts[3] == "" {
 		return credentialScope{}, fmt.Errorf("malformed credential scope %q: empty region or service", cred)
 	}
-	return credentialScope{region: parts[2], service: parts[3]}, nil
+	return credentialScope{accessKeyID: parts[0], region: parts[2], service: parts[3]}, nil
 }
 
 // stripInboundSignatureHeaders removes every header SignHTTP is going to
