@@ -764,6 +764,20 @@ proxy:
 
 When omitted, the tunnel listener is disabled.
 
+To serve the tunnel on more than one address (loopback for local services and
+an interface for a sandboxed workload, say), list the others under
+`extra_tunnel_listen` (`IRON_PROXY_EXTRA_TUNNEL_LISTEN`, comma-separated).
+Every address serves the same tunnel: one transform pipeline, one policy, one
+audit log, and a reload reaches all of them. It requires `tunnel_listen`, the
+addresses must be distinct, and iron-proxy fails to start if any of them
+cannot be bound.
+
+```yaml
+proxy:
+  tunnel_listen: "127.0.0.1:3128"
+  extra_tunnel_listen: ["10.250.255.1:3128"]
+```
+
 All protocols go through the same transform pipeline as regular HTTP/HTTPS
 requests. Absolute-form HTTP requests are handled by the normal HTTP proxy
 path. For CONNECT and SOCKS5, the proxy evaluates a synthetic CONNECT request

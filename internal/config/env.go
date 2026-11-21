@@ -46,6 +46,13 @@ func applyEnvOverrides(cfg *Config) error {
 	if v := os.Getenv("IRON_PROXY_TUNNEL_LISTEN"); v != "" {
 		cfg.Proxy.TunnelListen = v
 	}
+	if v := os.Getenv("IRON_PROXY_EXTRA_TUNNEL_LISTEN"); v != "" {
+		addrs, err := splitEnvList(v, "address")
+		if err != nil {
+			return fmt.Errorf("IRON_PROXY_EXTRA_TUNNEL_LISTEN: %w", err)
+		}
+		cfg.Proxy.ExtraTunnelListen = addrs
+	}
 	if v := os.Getenv("IRON_TLS_MODE"); v != "" {
 		cfg.TLS.Mode = v
 	}
@@ -128,13 +135,16 @@ func applyEnvOverrides(cfg *Config) error {
 	return nil
 }
 
-func splitCIDREnvList(v string) ([]string, error) {
+func splitCIDREnvList(v string) ([]string, error) { return splitEnvList(v, "CIDR") }
+
+// splitEnvList splits a comma-separated list, refusing an empty entry.
+func splitEnvList(v, what string) ([]string, error) {
 	parts := strings.Split(v, ",")
 	values := make([]string, 0, len(parts))
 	for _, part := range parts {
 		trimmed := strings.TrimSpace(part)
 		if trimmed == "" {
-			return nil, fmt.Errorf("empty CIDR entry")
+			return nil, fmt.Errorf("empty %s entry", what)
 		}
 		values = append(values, trimmed)
 	}

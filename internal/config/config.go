@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"time"
 
@@ -116,6 +117,11 @@ type Proxy struct {
 	// upstream SOCKS5/HTTP CONNECT proxy. The standard HTTP_PROXY/HTTPS_PROXY/
 	// NO_PROXY environment variables override these fields when set.
 	UpstreamProxy UpstreamProxy `yaml:"upstream_proxy"`
+	// ExtraTunnelListen lists further addresses for the tunnel listener,
+	// beside TunnelListen, each serving it with the same pipeline and policy:
+	// one proxy reachable on loopback and on an interface of its own, say.
+	// It requires TunnelListen; every address must be distinct.
+	ExtraTunnelListen []string `yaml:"extra_tunnel_listen"`
 }
 
 // CIDRList is a list of CIDR strings whose presence in YAML is distinguishable
@@ -282,6 +288,29 @@ func applyDefaults(cfg *Config) {
 	}
 }
 
+// validateExtraTunnelListen checks proxy.extra_tunnel_listen: each entry a
+// host:port, none repeated or equal to proxy.tunnel_listen, and only beside a
+// proxy.tunnel_listen.
+func validateExtraTunnelListen(p Proxy) error {
+	if len(p.ExtraTunnelListen) == 0 {
+		return nil
+	}
+	if p.TunnelListen == "" {
+		return fmt.Errorf("proxy.extra_tunnel_listen requires proxy.tunnel_listen")
+	}
+	seen := map[string]bool{p.TunnelListen: true}
+	for i, addr := range p.ExtraTunnelListen {
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			return fmt.Errorf("proxy.extra_tunnel_listen[%d]: %w", i, err)
+		}
+		if seen[addr] {
+			return fmt.Errorf("proxy.extra_tunnel_listen[%d]: %q is listed twice (with proxy.tunnel_listen or above)", i, addr)
+		}
+		seen[addr] = true
+	}
+	return nil
+}
+
 // Validate checks required fields and value constraints.
 func Validate(cfg *Config) error {
 	if cfg.DNS.IsEnabled() && cfg.DNS.ProxyIP == "" {
@@ -311,6 +340,10 @@ func Validate(cfg *Config) error {
 	}
 	if cfg.ControlPlane.PollInterval <= 0 {
 		return fmt.Errorf("control_plane.poll_interval must be positive; got %s", time.Duration(cfg.ControlPlane.PollInterval))
+	}
+
+	if err := validateExtraTunnelListen(cfg.Proxy); err != nil {
+		return err
 	}
 
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {

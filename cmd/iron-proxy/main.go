@@ -251,6 +251,7 @@ func main() {
 		HTTPAddr:                      cfg.Proxy.HTTPListen,
 		HTTPSAddr:                     cfg.Proxy.HTTPSListen,
 		TunnelAddr:                    cfg.Proxy.TunnelListen,
+		ExtraTunnelAddrs:              cfg.Proxy.ExtraTunnelListen,
 		TLSMode:                       cfg.TLS.Mode,
 		CertCache:                     certCache,
 		Pipeline:                      holder,
@@ -324,6 +325,9 @@ func main() {
 	}
 	if cfg.Proxy.TunnelListen != "" {
 		startAttrs = append(startAttrs, slog.String("tunnel_listen", cfg.Proxy.TunnelListen))
+	}
+	if len(cfg.Proxy.ExtraTunnelListen) > 0 {
+		startAttrs = append(startAttrs, slog.Any("extra_tunnel_listen", cfg.Proxy.ExtraTunnelListen))
 	}
 	logger.Info("iron-proxy starting", startAttrs...)
 	if pipeline := holder.Load(); !pipeline.Empty() {
