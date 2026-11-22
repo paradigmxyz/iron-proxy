@@ -506,7 +506,12 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 	reqBody := transform.RequireBufferedBody(r.Body)
 	// Check Len() before StreamingReader(), which clears the original reader.
 	reqBodyLen := reqBody.Len()
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, io.NopCloser(reqBody.StreamingReader()))
+	reader := reqBody.StreamingReader()
+	var upstreamBody io.ReadCloser = http.NoBody
+	if reader != http.NoBody && reqBodyLen != 0 {
+		upstreamBody = io.NopCloser(reader)
+	}
+	upstreamReq, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, upstreamBody)
 	if err != nil {
 		result.Action = transform.ActionContinue
 		result.StatusCode = http.StatusBadGateway
