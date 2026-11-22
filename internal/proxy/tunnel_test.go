@@ -218,6 +218,56 @@ func TestTunnel_HTTPProxyAbsoluteForm(t *testing.T) {
 	require.Equal(t, "hello from http proxy", string(body))
 }
 
+func TestTunnel_BodylessRequestFraming(t *testing.T) {
+	type observation struct {
+		method           string
+		transferEncoding []string
+		body             []byte
+		err              error
+	}
+	received := make(chan observation, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		received <- observation{r.Method, r.TransferEncoding, body, err}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+
+	_, tunnelAddr, _ := startTunnelProxy(t, nil)
+
+	cases := []struct {
+		name, method, header string
+	}{
+		{name: "MKCOL", method: "MKCOL"},
+		{name: "MKCOL with Content-Length zero", method: "MKCOL", header: "Content-Length: 0\r\n"},
+		{name: "DELETE", method: http.MethodDelete},
+		{name: "PROPFIND", method: "PROPFIND"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := net.DialTimeout("tcp", tunnelAddr, 5*time.Second)
+			require.NoError(t, err)
+			defer conn.Close()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+
+			// Write the request directly so the explicit zero reaches the proxy.
+			_, err = fmt.Fprintf(conn, "%s %s/collection/ HTTP/1.1\r\nHost: %s\r\n%s\r\n",
+				tc.method, upstream.URL, upstream.Listener.Addr(), tc.header)
+			require.NoError(t, err)
+			resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, http.StatusNoContent, resp.StatusCode)
+
+			got := <-received
+			require.Equal(t, tc.method, got.method)
+			require.NoError(t, got.err)
+			require.Empty(t, got.body)
+			require.Empty(t, got.transferEncoding)
+		})
+	}
+}
+
 func TestTunnel_HTTPProxyRejectsAbsoluteFormHTTPS(t *testing.T) {
 	_, tunnelAddr, _ := startTunnelProxy(t, nil)
 
