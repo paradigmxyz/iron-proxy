@@ -203,10 +203,9 @@ func (g *Gateway) Match(req *http.Request) *Route {
 	if g == nil {
 		return nil
 	}
-	host := hostmatch.StripPort(req.Host)
 	for _, route := range g.routes {
 		for _, rule := range route.rules {
-			if rule.Matches(host, req.Method, req.URL.Path) {
+			if rule.MatchesRequest(req) {
 				return route
 			}
 		}

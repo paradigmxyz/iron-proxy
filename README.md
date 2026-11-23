@@ -48,14 +48,20 @@ Single binary. Single YAML config.
 - **PostgreSQL MITM proxy.** Optional listener that authenticates clients
   against proxy-managed credentials, injects `SET ROLE` on the upstream
   session, and rejects client attempts to mutate the role (`SET ROLE`,
-  any `set_config` call, DO blocks, unsafe function definitions, definitions
-  that bind functions as callbacks such as `CREATE AGGREGATE`, etc.) via a
+  any `set_config` call, XML mapping and text-search functions that may run
+  SQL outside the inspected statement, `tablefunc`, `dblink`, `pg_background`,
+  and `pg_cron` SQL entry points, DO blocks, unsafe function definitions,
+  definitions that bind functions as callbacks
+  such as `CREATE AGGREGATE`, etc.) via a
   SQL AST walk. SQL and PL/pgSQL routine bodies are inspected recursively;
   dynamic PL/pgSQL and unsupported routine languages are rejected. As defense
   in depth, revoke `EXECUTE` on `pg_catalog.set_config` and unneeded
   `TEMPORARY` / `CREATE` privileges from the injected role (e.g. from
   `PUBLIC`), granting `set_config` back only to the login user that the proxy
-  uses for session setup. Pairs with
+  uses for session setup. The proxy always pins `standard_conforming_strings=on`
+  and `client_encoding=UTF8` on the upstream session and rejects client
+  attempts to change them, so its SQL parser and the server agree on how
+  statements are tokenized. Pairs with
   PostgreSQL row-level security to give per-tenant data isolation when the
   application connects as a shared service-account user. **Requires
   PgBouncer (if used) to run in `pool_mode = session`** — transaction or
@@ -324,7 +330,12 @@ Default-deny. Requests must match at least one domain glob or CIDR to proceed.
 Unmatched requests get a `403 Forbidden`.
 
 Domain patterns use glob matching: `*.example.com` matches any subdomain and
-`example.com` itself.
+`example.com` itself. Matching is ASCII case-insensitive; write
+internationalized domains in their punycode (`xn--`) form. Requests whose host
+is not plain ASCII or carries an IPv6 zone identifier, whose path contains `.`
+or `..` segments (including `..;` and `..\` forms), or whose request target is
+not origin-form or absolute-form are rejected with `400 Bad Request` before any
+transform runs.
 
 **Warn mode:** Set `warn: true` to observe what the allowlist would block without
 actually enforcing it. Requests that would be rejected are allowed through but
@@ -474,6 +485,43 @@ values before forwarding upstream. You control where it looks:
 - **`hosts`:** restrict swapping to specific domains or CIDRs.
 
 Query parameters are always scanned.
+
+**Keeping secrets off plain HTTP.** Plain HTTP can reach a transform: the HTTP
+listener always starts, and the tunnel listener accepts absolute-form
+`http://` requests. Without a guard, a matching plain-HTTP request gets the
+real secret and sends it upstream in clear text. Set `require_tls: true` on a
+rule to make it match only requests that arrived inside TLS (MITM'd or direct
+HTTPS). A plain-HTTP request then keeps its proxy token:
+
+```yaml
+- name: secrets
+  config:
+    secrets:
+      - source: {type: env, var: OPENAI_API_KEY}
+        replace:
+          proxy_value: proxy-openai-abc123
+          match_headers: [Authorization]
+        rules:
+          - host: api.openai.com
+            require_tls: true
+```
+
+`require_tls` defaults to `false`. It is accepted only by the credential
+injectors, where a rule not matching means no credential is added: `secrets`,
+`aws_auth`, `gcp_auth`, `gcp_id_token`, `oauth_token`, and `hmac_sign`.
+`gcp_auth` with no `rules` applies to every request, so it has no rule to set
+`require_tls` on.
+
+`require_tls` does not combine with `require: true`. A plain-HTTP request does
+not match the rule, so `require` does not apply to it either: the request is
+forwarded even without the proxy token.
+
+Everywhere else it is a config error. On a rule that enforces a policy
+(`judge`, `header_allowlist`, `grpc`, `body_capture`, `annotate`, MCP policy),
+plain-HTTP requests would stop matching and skip the policy. On `allowlist`,
+the tunnel's `CONNECT` preflight is not TLS either, so the host would become
+unreachable through the tunnel listener. On MCP gateway routes, a request that
+does not match is sent to its original host instead of the route upstream.
 
 Secret sources:
 

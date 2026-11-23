@@ -17,7 +17,8 @@
 // While the relay is running the proxy is mostly transparent. It rejects
 // client-issued role-changing statements (`SET ROLE`, `RESET ROLE`,
 // `SET SESSION AUTHORIZATION`, `RESET SESSION AUTHORIZATION`) and their
-// function-call equivalents; all calls to `set_config`; any `SET` or `RESET`
+// function-call equivalents; all calls to `set_config`; known functions that
+// may execute SQL outside the inspected statement; any `SET` or `RESET`
 // of a setting the upstream pins; the reset-everything statements
 // `RESET ALL` and `DISCARD ALL` (which would clear the managed role and pinned
 // settings); UPDATE or INSERT on pg_settings and view or rule definitions over
@@ -406,6 +407,9 @@ func compileSettings(ctx string, settings []Setting) ([]Setting, map[string]stru
 		lower := strings.ToLower(s.Name)
 		if lower == "role" || lower == "session_authorization" {
 			return nil, nil, fmt.Errorf("%s: settings[%d]: %q is managed by the proxy; use the role field", ctx, i, s.Name)
+		}
+		if isLexerSetting(lower) {
+			return nil, nil, fmt.Errorf("%s: settings[%d]: %q is managed by the proxy", ctx, i, s.Name)
 		}
 		if _, dup := pinned[lower]; dup {
 			return nil, nil, fmt.Errorf("%s: duplicate setting %q", ctx, s.Name)

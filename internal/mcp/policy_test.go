@@ -163,6 +163,16 @@ func TestCompileValidation(t *testing.T) {
 			}}},
 			errSub: "invalid matches regex",
 		},
+		{
+			// A require_tls rule would stop matching plain HTTP, so MatchServer
+			// would return nil and the request would skip policy evaluation.
+			name: "require_tls on a server rule",
+			config: Config{Servers: []ServerConfig{{
+				Name:  "a",
+				Rules: []hostmatch.RuleConfig{{Host: "a", RequireTLS: true}},
+			}}},
+			errSub: "require_tls is not supported here",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

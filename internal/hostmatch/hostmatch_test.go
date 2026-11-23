@@ -26,6 +26,9 @@ func TestMatchGlob(t *testing.T) {
 		{"*", "anything.example.com", true},
 		{"*", "1.2.3.4", true},
 		{"*", "", true},
+		// Unicode case folding must not make a different IDNA name match.
+		{"api.github.com", "api.g\u0130thub.com", false},
+		{"*.github.com", "api.g\u0130thub.com", false},
 	}
 
 	for _, tt := range tests {
@@ -53,4 +56,25 @@ func TestStripPort(t *testing.T) {
 			require.Equal(t, tt.want, StripPort(tt.host))
 		})
 	}
+}
+
+func TestMatcherRejectsNonCanonicalHosts(t *testing.T) {
+	m, err := New([]string{"*.allowed.example", "api.github.com", "*"}, []string{"0.0.0.0/0", "::/0"})
+	require.NoError(t, err)
+
+	cases := []string{
+		"::ffff:127.0.0.1%x.allowed.example",
+		"::1%x.allowed.example",
+		"fe80::1%eth0",
+		"api.g\u0130thub.com",
+		"b\u00fccher.allowed.example",
+	}
+	for _, host := range cases {
+		t.Run(host, func(t *testing.T) {
+			require.False(t, m.Matches(host))
+		})
+	}
+
+	require.True(t, m.Matches("x.allowed.example"))
+	require.True(t, m.Matches("::1"))
 }

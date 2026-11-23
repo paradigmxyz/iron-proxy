@@ -214,7 +214,7 @@ func newFromConfig(cfg secretsConfig, registry sourceBuilderRegistry) (*Secrets,
 			return nil, fmt.Errorf("secrets[%d]: %w", i, err)
 		}
 
-		rules, err := hostmatch.CompileRules(entry.Rules, fmt.Sprintf("secrets[%d]", i))
+		rules, err := hostmatch.CompileRulesAllowRequireTLS(entry.Rules, fmt.Sprintf("secrets[%d]", i))
 		if err != nil {
 			return nil, err
 		}
@@ -579,6 +579,8 @@ func (s *Secrets) swapBody(req *http.Request, sec *resolvedSecret, realValue str
 	}
 
 	if !bytes.Contains(data, []byte(sec.proxyValue)) {
+		// Put the body back so the next body-matching secret can read it.
+		req.Body = transform.NewBufferedBodyFromBytes(data)
 		return ""
 	}
 

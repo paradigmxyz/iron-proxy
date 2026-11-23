@@ -27,6 +27,9 @@ const (
 	// RejectSetConfig — the client called set_config. Dynamic targets cannot be
 	// inspected safely, so all calls are rejected regardless of the GUC name.
 	RejectSetConfig
+	// RejectOpaqueSQLFunction — the client called a function that executes SQL
+	// the statement classifier cannot inspect.
+	RejectOpaqueSQLFunction
 	// RejectFunctionCall — the client used the legacy wire-level FunctionCall
 	// protocol, which invokes a function by OID without inspectable SQL text.
 	RejectFunctionCall
@@ -43,6 +46,26 @@ const (
 	// aggregate whose SFUNC is set_config) the classifier cannot see.
 	RejectCallbackDefinition
 )
+
+// lexerSettings are the session settings that change how PostgreSQL tokenizes
+// SQL text. The classifier parses with libpg_query's fixed defaults
+// (standard_conforming_strings=on, UTF-8 input), so the proxy pins these on
+// every upstream session and forbids clients from changing them; otherwise the
+// proxy and the server could disagree about where a string literal ends.
+var lexerSettings = []Setting{
+	{Name: "standard_conforming_strings", Value: "on"},
+	{Name: "client_encoding", Value: "UTF8"},
+}
+
+// isLexerSetting reports whether name (lowercased) is one of lexerSettings.
+func isLexerSetting(name string) bool {
+	for _, s := range lexerSettings {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
+}
 
 // ClassifyClientStatement inspects sql and returns whether the relay should
 // reject it before forwarding upstream. (reason == 0) means "allow". pinned is
@@ -68,6 +91,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectClientRoleChange
 	case OpSetConfig:
 		return false, RejectSetConfig
+	case OpOpaqueSQLFunction:
+		return false, RejectOpaqueSQLFunction
 	case OpDoBlock:
 		// DO blocks contain opaque plpgsql we can't introspect from the SQL
 		// AST. Rather than risk an embedded role change slipping through,
@@ -89,7 +114,7 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectDiscardAll
 	}
 	for _, name := range op.SetGUCs {
-		if _, ok := pinned[name]; ok {
+		if _, ok := pinned[name]; ok || isLexerSetting(name) {
 			return false, RejectPinnedSetting
 		}
 	}
