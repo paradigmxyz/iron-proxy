@@ -45,6 +45,11 @@ const (
 	// implicitly invoked callbacks. These create executable aliases (e.g. an
 	// aggregate whose SFUNC is set_config) the classifier cannot see.
 	RejectCallbackDefinition
+	// RejectParseError — the proxy's bundled parser could not parse the
+	// statement. The upstream server may accept syntax the bundled grammar
+	// does not (e.g. a newer major version), so unparseable input is rejected
+	// rather than forwarded uninspected.
+	RejectParseError
 )
 
 // lexerSettings are the session settings that change how PostgreSQL tokenizes
@@ -104,6 +109,8 @@ func ClassifyClientStatement(sql string, pinned map[string]struct{}) (allowed bo
 		return false, RejectSettingsCatalogWrite
 	case OpCallbackDefinition:
 		return false, RejectCallbackDefinition
+	case OpParseError:
+		return false, RejectParseError
 	}
 	// RESET ALL / DISCARD ALL reset the proxy-managed role regardless of which
 	// settings the upstream pins, so they are always rejected.

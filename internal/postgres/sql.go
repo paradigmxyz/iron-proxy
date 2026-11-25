@@ -65,9 +65,9 @@ const (
 	// string literal; analyzing plpgsql requires a separate parser), so we
 	// reject DO blocks rather than risk missing an embedded role change.
 	OpDoBlock
-	// OpParseError indicates pg_query rejected the input. We forward to
-	// upstream so Postgres produces the canonical syntax error; the proxy
-	// doesn't try to second-guess.
+	// OpParseError indicates pg_query rejected the input. The policy rejects
+	// it: the upstream may accept syntax the bundled grammar does not, and
+	// forwarding would skip inspection entirely.
 	OpParseError
 	// OpSetConfig is any call to set_config, regardless of schema qualification
 	// or whether its target setting is a string literal. Dynamic targets cannot
@@ -316,11 +316,14 @@ func classifyPLpgSQLExpression(expr map[string]any) (Op, bool) {
 	case parseMode == 2:
 		query = "SELECT " + query
 	case parseMode >= 3:
-		_, rhs, ok := strings.Cut(query, ":=")
-		if !ok || strings.TrimSpace(rhs) == "" {
+		// Assignment: "target := expr" or "target = expr". The target may
+		// carry subscripts that PostgreSQL evaluates as SQL, so both sides
+		// must be classified.
+		target, rhs, ok := splitPLpgSQLAssignment(query)
+		if !ok || !isAssignmentTarget(target) {
 			return Op{}, false
 		}
-		query = "SELECT " + rhs
+		query = "SELECT " + target + ", " + rhs
 	default:
 		// Type-name parse modes cannot execute SQL or mutate a setting.
 		return Op{Kind: OpOther}, true
@@ -331,6 +334,64 @@ func classifyPLpgSQLExpression(expr map[string]any) (Op, bool) {
 		return Op{}, false
 	}
 	return op, true
+}
+
+// splitPLpgSQLAssignment splits a PL/pgSQL assignment at its first top-level
+// ":=" or "=" token. Tokens inside parentheses or brackets (e.g. a
+// comparison inside a subscript) are skipped.
+func splitPLpgSQLAssignment(query string) (target, rhs string, ok bool) {
+	scanned, err := pgparse.Scan(query)
+	if err != nil {
+		return "", "", false
+	}
+	depth := 0
+	for _, tok := range scanned.GetTokens() {
+		switch tok.GetToken() {
+		case pg_query.Token_ASCII_40, pg_query.Token_ASCII_91:
+			depth++
+		case pg_query.Token_ASCII_41, pg_query.Token_ASCII_93:
+			depth--
+		case pg_query.Token_COLON_EQUALS, pg_query.Token_ASCII_61:
+			if depth != 0 {
+				continue
+			}
+			start, end := int(tok.GetStart()), int(tok.GetEnd())
+			if start < 0 || end > len(query) || start > end {
+				return "", "", false
+			}
+			target, rhs = query[:start], query[end:]
+			if strings.TrimSpace(target) == "" || strings.TrimSpace(rhs) == "" {
+				return "", "", false
+			}
+			return target, rhs, true
+		}
+	}
+	return "", "", false
+}
+
+// isAssignmentTarget reports whether target parses as a single variable
+// reference, optionally with field selection or subscripts. Anything else is
+// not a shape PostgreSQL would accept as an assignment target, so treating it
+// as one could diverge from the server's interpretation.
+func isAssignmentTarget(target string) bool {
+	result, err := pgparse.Parse("SELECT " + target)
+	if err != nil || len(result.GetStmts()) != 1 {
+		return false
+	}
+	sel := result.GetStmts()[0].GetStmt().GetSelectStmt()
+	if sel == nil || len(sel.GetTargetList()) != 1 || sel.GetFromClause() != nil ||
+		sel.GetWhereClause() != nil || sel.GetWithClause() != nil {
+		return false
+	}
+	res := sel.GetTargetList()[0].GetResTarget()
+	if res == nil || res.GetName() != "" {
+		return false
+	}
+	val := res.GetVal()
+	if ind := val.GetAIndirection(); ind != nil {
+		val = ind.GetArg()
+	}
+	return val.GetColumnRef() != nil
 }
 
 // routineStringOption returns a single string value from a CREATE FUNCTION /

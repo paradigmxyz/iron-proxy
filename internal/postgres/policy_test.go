@@ -124,6 +124,26 @@ func TestClassifyClientStatement(t *testing.T) {
 			reason: RejectUninspectableRoutine,
 		},
 		{
+			name:   "plpgsql assignment subscript calls set_config",
+			sql:    "CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE plpgsql AS $$ DECLARE a int[]; BEGIN a[length(set_config('role','x',false))] := 1; RETURN 1; END $$",
+			reason: RejectSetConfig,
+		},
+		{
+			name:   "plpgsql equals assignment subscript calls set_config",
+			sql:    "CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE plpgsql AS $$ DECLARE a int[]; BEGIN a[length(set_config('role','x',false))] = 1; RETURN 1; END $$",
+			reason: RejectSetConfig,
+		},
+		{
+			name:   "plpgsql assignment slice calls set_config",
+			sql:    "CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE plpgsql AS $$ DECLARE a int[]; BEGIN a[1:length(set_config('role','x',false))] := '{1}'; RETURN 1; END $$",
+			reason: RejectSetConfig,
+		},
+		{
+			name:    "plpgsql subscript and field assignments allowed",
+			sql:     "CREATE FUNCTION pg_temp.f() RETURNS int LANGUAGE plpgsql AS $$ DECLARE a int[]; r record; b bool; BEGIN a[1] := 1; a[(1 = 1)::int] = 2; b = 1 = 1; r.x := a[1]; RETURN 1; END $$",
+			allowed: true,
+		},
+		{
 			name:    "sql function may call existing routine",
 			sql:     "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $$ SELECT existing_wrapper() $$",
 			allowed: true,
@@ -161,6 +181,10 @@ func TestClassifyClientStatement(t *testing.T) {
 		{name: "view over pg_settings rejected", sql: "CREATE TEMP VIEW v AS SELECT * FROM pg_settings", reason: RejectSettingsCatalogWrite},
 		{name: "aggregate aliasing set_config rejected", sql: "CREATE AGGREGATE pg_temp.a(text, boolean) (SFUNC = pg_catalog.set_config, STYPE = text)", reason: RejectCallbackDefinition},
 		{name: "select pg_settings allowed", sql: "SELECT name, setting FROM pg_settings", allowed: true},
+
+		// Unparseable input fails closed.
+		{name: "syntax error rejected", sql: "INSERT FROM WHERE", reason: RejectParseError},
+		{name: "role change before newer syntax rejected", sql: "SET ROLE x; CREATE TEMP TABLE t (a int, b int GENERATED ALWAYS AS (a) VIRTUAL)", reason: RejectParseError},
 
 		// DO blocks rejected outright.
 		{name: "do block rejected", sql: "DO $$ BEGIN END $$", reason: RejectDoBlock},
