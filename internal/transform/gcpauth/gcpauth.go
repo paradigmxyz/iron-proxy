@@ -176,7 +176,7 @@ func tokenSourceFromKeyfile(ctx context.Context, keyJSON []byte, scopes []string
 	if err := json.Unmarshal(keyJSON, &meta); err == nil {
 		email = meta.ClientEmail
 	}
-	return cfg.TokenSource(ctx), email, nil
+	return cfg.TokenSource(withOutboundHTTPClient(ctx)), email, nil
 }
 
 func (g *GCPAuth) Name() string { return "gcp_auth" }

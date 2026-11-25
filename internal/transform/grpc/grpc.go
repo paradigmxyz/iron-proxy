@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -112,7 +113,7 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 		return nil, err
 	}
 
-	conn, err := grpc.NewClient(cfg.Target, creds)
+	conn, err := grpc.NewClient(cfg.Target, grpcDialOptions(cfg.Target, creds)...)
 	if err != nil {
 		return nil, fmt.Errorf("grpc transform %q: %w", cfg.Name, err)
 	}
@@ -125,6 +126,24 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 		conn:             conn,
 		client:           transformv1.NewTransformServiceClient(conn),
 	}, nil
+}
+
+// grpcDialOptions adds the installed outbound dialer so the transform's own
+// connection to its TransformService server goes through the same deny guard
+// as every other outbound dial. Unix-socket targets are left alone because the
+// guard dials TCP addresses.
+func grpcDialOptions(target string, creds grpc.DialOption) []grpc.DialOption {
+	opts := []grpc.DialOption{creds}
+	dial := transform.OutboundDialer()
+	if dial == nil {
+		return opts
+	}
+	if u, err := url.Parse(target); err == nil && (u.Scheme == "unix" || u.Scheme == "unix-abstract") {
+		return opts
+	}
+	return append(opts, grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+		return dial(ctx, "tcp", addr)
+	}))
 }
 
 func (g *GRPCTransform) Name() string { return g.name }

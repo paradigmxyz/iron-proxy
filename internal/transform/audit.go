@@ -39,6 +39,13 @@ func NewAuditLogger(logger *slog.Logger) AuditFunc {
 				slog.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
 			),
 		}
+		if result.Tenant != nil {
+			tenantAttrs := []any{slog.String("sub", result.Tenant.Subject)}
+			if result.Tenant.ID != "" {
+				tenantAttrs = append(tenantAttrs, slog.String("jti", result.Tenant.ID))
+			}
+			attrs = append(attrs, slog.Group("tenant", tenantAttrs...))
+		}
 		if result.Tunnel != nil {
 			tunnelAttrs := []any{slog.String("target", result.Tunnel.Target)}
 			if len(result.Tunnel.RequestTransforms) > 0 {

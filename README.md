@@ -553,10 +553,20 @@ Secret sources:
   `secret_ref` against a self-hosted 1Password Connect server. The server URL
   is read from `OP_CONNECT_HOST` and the API token from `OP_CONNECT_TOKEN`.
   Optional `ttl` and `failure_ttl` are supported.
+- **`tenant_token`:** returns the verified tenant token attached to the current
+  request in tenancy mode. It is only meaningful in tenancy mode: outside it,
+  or on a request that carries no token, the source is unavailable, so
+  `require: true` rejects and `require: false` skips. The value is never cached
+  because each request presents its own token. `json_key` is not supported.
 
-Every source also accepts an optional `json_key`. When set, the resolved value
-is parsed as a JSON object and the single top-level string field at that key is
-extracted. Use it to pull one field out of a JSON secret.
+Region values in `aws_sm`, `aws_ssm`, and the `aws_auth` transform's
+`credentials_provider` must be valid AWS region names such as `us-east-1`;
+this validation applies in all modes.
+
+Every source except `tenant_token` also accepts an optional `json_key`. When
+set, the resolved value is parsed as a JSON object and the single top-level
+string field at that key is extracted. Use it to pull one field out of a JSON
+secret.
 
 `ttl` controls how long a successfully fetched value is cached before refresh
 (empty caches forever). `failure_ttl` controls how long a fetch error is
@@ -1114,6 +1124,200 @@ Reload a running proxy:
 curl -X POST http://127.0.0.1:9092/v1/reload \
   -H "Authorization: Bearer $IRON_MANAGEMENT_API_KEY"
 ```
+
+## Tenancy mode
+
+Tenancy mode runs one proxy for many tenants. Each tenant presents a tenant
+token minted by the control plane's API, and iron-proxy runs its traffic
+through the config the control plane returns for that token. The proxy does
+not decide what a tenant may do; it verifies the token and applies the config
+the control plane supplies for it.
+
+Tenancy requires the tunnel listener and MITM TLS. It refuses to start if the
+Postgres or SSH listener is configured, or alongside control-plane managed mode
+(`IRON_PROXY_TOKEN`). Enable it in the config:
+
+```yaml
+tenancy:
+  enabled: true
+  token:
+    issuer: "https://api.iron.sh" # Required `iss` claim
+    audience: "iron-proxy" # Required `aud` claim
+  config:
+    url: "https://control-plane.example/tenant-config" # Required
+    fresh_for: 1m # Default: 1m
+    stale_for: 10m # Default: 10m; must be at least fresh_for
+```
+
+`tenancy.config.url` may use `http` for an in-cluster control plane. Both the
+proxy's control-plane token and the tenant token travel on that hop, so prefer
+`https` or a private network; over plain `http` they are sent in cleartext.
+
+The Ed25519 public keys that verify tenant tokens come from
+`IRON_TENANT_PUBLIC_KEYS`, never the config file. The value is one or more
+SPKI PEM `PUBLIC KEY` blocks; more than one key allows rotation.
+`IRON_TENANCY_ENABLED`, `IRON_TENANCY_TOKEN_ISSUER`,
+`IRON_TENANCY_TOKEN_AUDIENCE`, and `IRON_TENANCY_CONFIG_URL` override the
+corresponding config fields. The proxy authenticates to the config endpoint
+with the credential in `IRON_TENANCY_CONTROL_PLANE_TOKEN`, which is required
+when tenancy is enabled.
+
+A tenant's pipeline runs the YAML `transforms` first, then the tenant's own
+config, so proxy-wide transforms apply to every tenant.
+
+### CONNECT contract
+
+A tenant opens a tunnel through the tunnel listener with
+`Proxy-Authorization: Bearer <tenant token>` on the CONNECT:
+
+```bash
+curl -x http://172.20.0.2:8080 \
+  -H "Proxy-Authorization: Bearer $TENANT_TOKEN" \
+  --cacert /certs/ca.crt \
+  https://httpbin.org/get
+```
+
+A token is an EdDSA/Ed25519 JWT. It must carry the configured `iss` and `aud`,
+a non-empty `sub`, and an `exp`; `nbf` and `iat` are checked when present.
+Claims are checked with 30 seconds of clock-skew leeway. The token must expire
+no more than 24 hours ahead (plus that leeway), and any `exp`, `nbf`, or `iat`
+that is negative, non-finite, or beyond the proxy's accepted range is refused.
+
+The token establishes the tunnel. Every request inside it resolves its tenant
+again, so a refresh after `fresh_for` and a control-plane refusal both take
+effect on the tunnel's next request. Token expiry is checked on each request
+as well. Long-lived streams already in progress (WebSocket, SSE) are not cut.
+Absolute-form `http://` requests on the tunnel listener are authenticated
+individually, and `Proxy-Authorization` is removed before any transform sees
+the request in both cases. SOCKS5 is refused during method negotiation because
+it has no place for a bearer token, and that refusal is audited. The plain
+HTTP and HTTPS listeners refuse every request because it did not arrive
+through a tenant's tunnel.
+
+Refusals carry `X-Iron-Proxy-Error`:
+
+| Status | `X-Iron-Proxy-Error`      | Meaning                                                        |
+| ------ | ------------------------- | -------------------------------------------------------------- |
+| 407    | `tenant_token_required`   | No `Bearer` tenant token was presented.                        |
+| 407    | `tenant_token_invalid`    | The token failed signature or claim checks.                    |
+| 403    | `tenant_refused`          | The control plane answered with 403 or 404 for this tenant.    |
+| 503    | `tenant_config_unavailable` | No usable config, and the control plane could not supply one. |
+| 401    | `tenant_token_expired`    | The tunnel's token expired; later inner requests are refused.  |
+
+407 responses include `Proxy-Authenticate: Bearer realm="iron-proxy"`. Requests
+refused before a tenant is bound, including those on the plain listeners, are
+audited as tenancy rejections without a tenant subject.
+
+### Control-plane contract
+
+The proxy fetches a tenant's config by calling `tenancy.config.url`
+authenticated as the proxy, with the tenant token in `X-Iron-Tenant-Token`
+selecting whose config to return. The body is the same as a managed proxy's
+sync request:
+
+```http
+POST <tenancy.config.url>
+Authorization: Bearer <IRON_TENANCY_CONTROL_PLANE_TOKEN>
+X-Iron-Tenant-Token: <tenant token>
+Content-Type: application/json
+
+{"config_hash": "<last known hash, or empty on the first fetch>"}
+```
+
+A tenant token alone must never fetch a config, because it is held by
+less-trusted components. The proxy credential proves the caller is the tenancy
+proxy; the tenant token only selects whose config comes back.
+
+A 200 response carries the current `config_hash` and either the full config or
+only the hash when nothing changed:
+
+```json
+{
+  "config_hash": "sha256:...",
+  "rules": [],
+  "secrets": [],
+  "transforms": []
+}
+```
+
+`rules`, `secrets`, and `transforms` have the same shape as the control plane's
+`/api/v1/proxy/sync` response. A hash-only response is accepted only for a
+`config_hash` that token was already served; any other hash-only answer is
+treated as a failure.
+
+- **401:** the control plane refused the proxy's credential. This is an
+  availability failure, not a statement about the tenant: keep serving the
+  last good config while it is younger than `stale_for`, otherwise answer 503.
+- **403 or 404:** the tenant is refused and its cached config is evicted.
+- **Any other failure** (other status, timeout, invalid body, or a pipeline
+  that fails to build): keep serving the last good config while it is younger
+  than `stale_for`; otherwise answer 503.
+
+Refusals (403/404) and failures that leave a token with no usable config are
+remembered for the negative-cache window and then retried. A pipeline that
+fails to build is logged with its `config_hash` but not the error text, which
+can quote config values.
+
+### Caching
+
+Configs are cached per token, and pipelines are keyed by a digest the proxy
+computes over the `rules`, `secrets`, and `transforms` it received, so every
+token served byte-identical config shares one pipeline. The control plane's
+`config_hash` is used only for conditional refreshes; it never selects a
+pipeline. The first request for a token fetches its config; requests within
+`fresh_for` reuse it. After that, the next request refreshes it conditionally
+with `config_hash` while concurrent requests continue using the current
+pipeline. Only one fetch runs per token at a time.
+
+Idle tokens and unused pipelines are evicted after 15 minutes, expired tokens
+are pruned, and the cache holds at most 10,000 tokens. When a fetch fails and
+the token has no usable config to fall back on, the failure — including a
+control-plane refusal or a pipeline that fails to build — is remembered for
+five seconds so a failing control plane is not hammered. Control-plane
+responses are capped at 16 MiB.
+
+### Restrictions and the tenant token source
+
+Tenant configs are restricted before their pipeline is built. Only the
+credential transforms — `oauth_token`, `gcp_auth`, `gcp_id_token`, `aws_auth`,
+and `hmac_sign` — may appear in `transforms`; every other transform is dropped
+with a logged reason, so a tenant's allowlist comes only from its `rules`. A
+`secrets` entry's source type, and any `type` anywhere in a kept transform's
+config, must be one of `control_plane`, `tenant_token`, `1password`,
+`1password_connect`, `aws_sm`, or `aws_ssm`; the only credentials provider
+tenants may use is `workload_identity`. Any other type — `env`, `file`,
+`vault_kv`, judge providers, or a type added later — is dropped, as is any
+transform config with a GCP `keyfile_path`. For `oauth_token`, only the
+offending token entries are dropped. Checks read exact keys, and kept entries
+are re-encoded from what was checked, so duplicate or case-variant keys cannot
+slip a different source past the check.
+
+In tenancy mode the guarded outbound dialer is installed for transforms and
+secret sources, because tenant configs choose those destinations. Their own
+calls — OAuth and GCP token endpoints, AWS STS, Secrets Manager and SSM, Vault,
+1Password Connect, judge LLM providers, and the gRPC transform — dial directly
+through the same `proxy.upstream_deny_cidrs` guard as upstream requests. These
+dialer-backed calls do not use environment proxies, since a proxy would hide
+the real destination from the guard. The default deny list includes the cloud
+instance metadata addresses, so EC2 IMDS credentials are unavailable to a
+tenant `workload_identity` provider, and `aws_sm`/`aws_ssm` (which use the same
+default credential chain) cannot fall back to them. IRSA still works because
+its STS call is an ordinary public endpoint through the guard. EKS Pod Identity
+still works because the AWS SDK fetches its local agent credentials with its
+own client, which the guard does not cover. GKE's metadata path likewise uses
+ADC's own metadata client, which the guard does not cover. The 1Password
+service-account SDK cannot be guarded either. Other modes keep their existing
+direct dialers.
+
+The `tenant_token` secret source returns the verified token attached to the
+current request. It is only available in tenancy mode on a request that
+carries a token, and its value is never cached; `json_key` is not supported.
+
+### Audit
+
+Requests served in tenancy mode add a `tenant` group to the JSON and OTEL
+audit records with the token's `sub` and, when present, `jti`. The raw token is
+never logged.
 
 ## iron.sh
 

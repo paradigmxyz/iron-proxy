@@ -172,7 +172,7 @@ func tokenSourceFromKeyfile(ctx context.Context, keyJSON []byte, audience string
 	if err := json.Unmarshal(keyJSON, &meta); err == nil {
 		email = meta.ClientEmail
 	}
-	return cfg.TokenSource(ctx), email, nil
+	return cfg.TokenSource(withOutboundHTTPClient(ctx)), email, nil
 }
 
 func (g *GCPIDToken) Name() string { return "gcp_id_token" }

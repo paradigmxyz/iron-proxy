@@ -54,6 +54,14 @@ func NewOTELAuditFunc(provider *sdklog.LoggerProvider) AuditFunc {
 			attribute.Float64("duration_ms", float64(result.Duration.Microseconds())/1000.0),
 		}
 
+		if result.Tenant != nil {
+			tenantKVs := []attribute.KeyValue{attribute.String("sub", result.Tenant.Subject)}
+			if result.Tenant.ID != "" {
+				tenantKVs = append(tenantKVs, attribute.String("jti", result.Tenant.ID))
+			}
+			attrs = append(attrs, attribute.KeyValue{Key: "tenant", Value: attribute.MapValue(tenantKVs...)})
+		}
+
 		if result.Action == ActionReject {
 			for _, tr := range result.RequestTransforms {
 				if tr.Action == ActionReject {

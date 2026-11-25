@@ -46,6 +46,22 @@ func applyEnvOverrides(cfg *Config) error {
 	if v := os.Getenv("IRON_PROXY_TUNNEL_LISTEN"); v != "" {
 		cfg.Proxy.TunnelListen = v
 	}
+	if v := os.Getenv("IRON_TENANCY_ENABLED"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("IRON_TENANCY_ENABLED: %w", err)
+		}
+		cfg.Tenancy.Enabled = b
+	}
+	if v := os.Getenv("IRON_TENANCY_TOKEN_ISSUER"); v != "" {
+		cfg.Tenancy.Token.Issuer = v
+	}
+	if v := os.Getenv("IRON_TENANCY_TOKEN_AUDIENCE"); v != "" {
+		cfg.Tenancy.Token.Audience = v
+	}
+	if v := os.Getenv("IRON_TENANCY_CONFIG_URL"); v != "" {
+		cfg.Tenancy.Config.URL = v
+	}
 	if v := os.Getenv("IRON_TLS_MODE"); v != "" {
 		cfg.TLS.Mode = v
 	}

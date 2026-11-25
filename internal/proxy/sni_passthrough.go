@@ -51,7 +51,7 @@ func (p *Proxy) serveSNIPassthrough(clientConn net.Conn) error {
 		SNI:        sni,
 		Mode:       transform.ModeSNIOnly,
 	}
-	pl, finish := p.beginPipelineRun(result)
+	pl, finish := p.beginPipelineRun(result, nil)
 	defer finish()
 
 	if !p.isReady() {

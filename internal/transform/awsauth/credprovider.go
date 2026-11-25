@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 type credentialsProviderBuilder func(yaml.Node, *slog.Logger) (aws.CredentialsProvider, error)
@@ -54,6 +58,11 @@ func buildWorkloadIdentity(node yaml.Node, _ *slog.Logger) (aws.CredentialsProvi
 	if err := node.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing workload_identity provider: %w", err)
 	}
+	if cfg.Region != "" {
+		if err := transform.ValidateAWSRegion(cfg.Region); err != nil {
+			return nil, fmt.Errorf("credentials_provider region: %w", err)
+		}
+	}
 	return aws.NewCredentialsCache(&lazyDefaultChainProvider{region: cfg.Region}), nil
 }
 
@@ -73,6 +82,14 @@ func (p *lazyDefaultChainProvider) Retrieve(ctx context.Context) (aws.Credential
 		var opts []func(*awsconfig.LoadOptions) error
 		if p.region != "" {
 			opts = append(opts, awsconfig.WithRegion(p.region))
+		}
+		if dial := transform.OutboundDialer(); dial != nil {
+			client := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+				tr.DialContext = dial
+				// An env proxy would hide the real destination from the guard.
+				tr.Proxy = nil
+			})
+			opts = append(opts, awsconfig.WithHTTPClient(client))
 		}
 		cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 		if err != nil {

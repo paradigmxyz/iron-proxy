@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 
 	vaultapi "github.com/hashicorp/vault/api"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 // vaultKVClient is the subset of Vault used by vaultKVBuilder, narrowed for
@@ -45,7 +48,21 @@ func (cfg vaultKVConfig) version() int {
 func newVaultKVBuilder(logger *slog.Logger) *vaultKVBuilder {
 	cache := &vaultKVClientCache{
 		newClient: func() (vaultKVClient, error) {
-			client, err := vaultapi.NewClient(nil)
+			var cfg *vaultapi.Config
+			if dial := transform.OutboundDialer(); dial != nil {
+				cfg = vaultapi.DefaultConfig()
+				if cfg.Error != nil {
+					return nil, cfg.Error
+				}
+				tr, ok := cfg.HttpClient.Transport.(*http.Transport)
+				if !ok {
+					return nil, fmt.Errorf("vault client transport is %T, want *http.Transport", cfg.HttpClient.Transport)
+				}
+				tr.DialContext = dial
+				// An env proxy would hide the real destination from the guard.
+				tr.Proxy = nil
+			}
+			client, err := vaultapi.NewClient(cfg)
 			if err != nil {
 				return nil, err
 			}
