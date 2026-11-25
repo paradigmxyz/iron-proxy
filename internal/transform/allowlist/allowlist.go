@@ -79,7 +79,7 @@ func New(domains []string, cidrs []string) (*Allowlist, error) {
 func (a *Allowlist) Name() string { return "allowlist" }
 
 func (a *Allowlist) TransformRequest(_ context.Context, tctx *transform.TransformContext, req *http.Request) (*transform.TransformResult, error) {
-	if hostmatch.MatchAnyRule(a.rules, req) {
+	if a.matches(tctx, req) {
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 	if a.warn {
@@ -87,6 +87,25 @@ func (a *Allowlist) TransformRequest(_ context.Context, tctx *transform.Transfor
 		return &transform.TransformResult{Action: transform.ActionContinue}, nil
 	}
 	return &transform.TransformResult{Action: transform.ActionReject}, nil
+}
+
+// matches reports whether req is allowed by any rule. The tunnel preflight is
+// a synthetic CONNECT with no path, so method and path restrictions can never
+// match it. It is checked against the host only. Method and path rules are
+// enforced on the requests inside the tunnel, which run through the pipeline
+// again (MITM and plain HTTP), or the tunnel cannot carry them (sni-only,
+// where only host-only rules match the passthrough check).
+func (a *Allowlist) matches(tctx *transform.TransformContext, req *http.Request) bool {
+	if !tctx.TunnelPreflight {
+		return hostmatch.MatchAnyRule(a.rules, req)
+	}
+	host := hostmatch.StripPort(req.Host)
+	for _, r := range a.rules {
+		if r.Matcher.Matches(host) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Allowlist) TransformResponse(_ context.Context, _ *transform.TransformContext, _ *http.Request, _ *http.Response) (*transform.TransformResult, error) {
