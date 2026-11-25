@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -17,6 +18,99 @@ import (
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/stretchr/testify/require"
 )
+
+// Verify the complete HTTP proxy path against SDK S3 signatures, including
+// preservation of escaped object names during forwarding to the upstream.
+func TestAWSAuthEscapedPaths(t *testing.T) {
+	observed := make(chan *http.Request, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		observed <- r.Clone(context.Background())
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	cfgPath := renderConfig(t, t.TempDir(), "awsauth.yaml", nil)
+	proxy := startProxy(t, proxyBinary(t), cfgPath, []string{
+		"AWS_ACCESS_KEY_ID=AKIAEXAMPLE",
+		"AWS_SECRET_ACCESS_KEY=example-secret",
+	})
+	upstreamHost := upstream.Listener.Addr().String()
+	cases := []struct{ name, path string }{
+		{"plain", "/bucket/hero.png"},
+		{"at2x", "/bucket/hero%402x.png"},
+		{"space", "/bucket/hero%20large.png"},
+		{"unicode", "/bucket/%E6%97%A5%E6%9C%AC%E8%AA%9E.png"},
+		{"percent", "/bucket/100%25.png"},
+		{"literal escape", "/bucket/hero%25402x.png"},
+		{"plus", "/bucket/hero%2Blarge.png"},
+		{"hash and question", "/bucket/hero%23%3F.png"},
+		{"escaped slash", "/bucket/a%2Fb.png"},
+		{"repeated slash", "/bucket/a//b.png"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, service := range []string{"s3", "bedrock"} {
+				for _, method := range []string{http.MethodPut, http.MethodHead, http.MethodGet} {
+					t.Run(service+method, func(t *testing.T) {
+						uri := tc.path + "?prefix=a%20b%2Bc%25&x=1"
+						req, err := http.NewRequest(method, "http://"+proxy.HTTPAddr+uri, nil)
+						require.NoError(t, err)
+						req.Host = upstreamHost
+						if method == http.MethodPut {
+							req.Header.Set("If-None-Match", "*")
+						}
+						sum := sha256.Sum256(nil)
+						hash := hex.EncodeToString(sum[:])
+						require.NoError(t, v4.NewSigner().SignHTTP(context.Background(),
+							aws.Credentials{AccessKeyID: "PLACEHOLDER", SecretAccessKey: "placeholder"},
+							req, hash, service, "us-east-1", time.Now().UTC(), func(o *v4.SignerOptions) {
+								o.DisableURIPathEscaping = service == "s3"
+							}))
+						resp, err := http.DefaultClient.Do(req)
+						require.NoError(t, err)
+						_, err = io.Copy(io.Discard, resp.Body)
+						require.NoError(t, err)
+						require.NoError(t, resp.Body.Close())
+						require.Equal(t, http.StatusOK, resp.StatusCode)
+						var got *http.Request
+						select {
+						case got = <-observed:
+						case <-time.After(5 * time.Second):
+							t.Fatal("upstream did not receive request")
+						}
+						require.Equal(t, uri, got.RequestURI)
+						if method == http.MethodPut {
+							require.Equal(t, "*", got.Header.Get("If-None-Match"))
+						}
+						// Recompute the signature from what actually arrived, using the
+						// SDK's service-specific options and only the declared signed headers.
+						auth := got.Header.Get("Authorization")
+						_, signed, found := strings.Cut(auth, "SignedHeaders=")
+						require.True(t, found)
+						signed, _, found = strings.Cut(signed, ",")
+						require.True(t, found)
+						expected := got.Clone(context.Background())
+						expected.URL, err = url.Parse("http://" + upstreamHost + uri)
+						require.NoError(t, err)
+						expected.Header = make(http.Header)
+						for _, name := range strings.Split(signed, ";") {
+							if name != "host" {
+								expected.Header[http.CanonicalHeaderKey(name)] = got.Header.Values(name)
+							}
+						}
+						when, err := time.Parse("20060102T150405Z", got.Header.Get("X-Amz-Date"))
+						require.NoError(t, err)
+						require.NoError(t, v4.NewSigner().SignHTTP(context.Background(),
+							aws.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "example-secret"},
+							expected, hash, service, "us-east-1", when, func(o *v4.SignerOptions) {
+								o.DisableURIPathEscaping = service == "s3"
+							}))
+						require.Equal(t, expected.Header.Get("Authorization"), auth)
+					})
+				}
+			}
+		})
+	}
+}
 
 // TestAWSAuth boots the proxy with the aws_auth transform configured and
 // verifies that an SDK-signed request arrives at the upstream with a fresh
