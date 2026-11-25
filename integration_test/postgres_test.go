@@ -41,30 +41,12 @@ func TestPostgresPolicy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	initScript, err := filepath.Abs(filepath.Join("testdata", "postgres_init.sql"))
-	require.NoError(t, err)
-
-	container, err := tcpostgres.Run(ctx, pgImage,
-		tcpostgres.WithDatabase(pgUpstreamDB),
-		tcpostgres.WithUsername(pgUpstreamUser),
-		tcpostgres.WithPassword(pgUpstreamPass),
-		tcpostgres.WithInitScripts(initScript),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Skipf("postgres testcontainers unavailable (is Docker running?): %v", err)
-	}
-	testcontainers.CleanupContainer(t, container)
-
-	upstreamHost, err := container.Host(ctx)
-	require.NoError(t, err)
-	upstreamPort, err := container.MappedPort(ctx, "5432/tcp")
-	require.NoError(t, err)
+	upstreamHost, upstreamPort := startPostgresContainer(ctx, t, pgImage)
 
 	cfgPath := renderConfig(t, t.TempDir(), "postgres_pipeline.yaml", nil)
 
 	upstreamDSN := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort.Num(), pgUpstreamDB)
+		pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort, pgUpstreamDB)
 	env := []string{
 		"PG_UPSTREAM_DSN=" + upstreamDSN,
 		"PG_PROXY_PASSWORD=" + pgClientPassword,
@@ -127,7 +109,7 @@ func TestPostgresPolicy(t *testing.T) {
 		// superuser and confirm all 5 rows are present. This rules out a
 		// fixture problem if the through-proxy assertion later sees 0 rows.
 		directURL := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-			pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort.Num(), pgUpstreamDB)
+			pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort, pgUpstreamDB)
 		direct, err := pgx.Connect(ctx, directURL)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = direct.Close(ctx) })
@@ -579,31 +561,13 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
-	initScript, err := filepath.Abs(filepath.Join("testdata", "postgres_init.sql"))
-	require.NoError(t, err)
-
-	container, err := tcpostgres.Run(ctx, pgImage,
-		tcpostgres.WithDatabase(pgUpstreamDB),
-		tcpostgres.WithUsername(pgUpstreamUser),
-		tcpostgres.WithPassword(pgUpstreamPass),
-		tcpostgres.WithInitScripts(initScript),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
-		t.Skipf("postgres testcontainers unavailable (is Docker running?): %v", err)
-	}
-	testcontainers.CleanupContainer(t, container)
-
-	upstreamHost, err := container.Host(ctx)
-	require.NoError(t, err)
-	upstreamPort, err := container.MappedPort(ctx, "5432/tcp")
-	require.NoError(t, err)
+	upstreamHost, upstreamPort := startPostgresContainer(ctx, t, pgImage)
 
 	cfgPath := renderConfig(t, t.TempDir(), "postgres_multi_pipeline.yaml", nil)
 
 	dsnFor := func(database string) string {
 		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-			pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort.Num(), database)
+			pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort, database)
 	}
 	env := []string{
 		"PG_UPSTREAM_DSN=" + dsnFor(pgUpstreamDB), // appdb
@@ -681,4 +645,72 @@ func TestPostgresMultipleUpstreams(t *testing.T) {
 		require.True(t, errors.As(err, &pgErr), "want PgError, got %T: %v", err, err)
 		require.Equal(t, "3D000", pgErr.Code)
 	})
+}
+
+// startPostgresContainer boots a PostgreSQL container from image with the
+// shared init script and returns its host and mapped port. Skips the test when
+// no Docker daemon is reachable.
+func startPostgresContainer(ctx context.Context, t *testing.T, image string) (string, uint16) {
+	t.Helper()
+	initScript, err := filepath.Abs(filepath.Join("testdata", "postgres_init.sql"))
+	require.NoError(t, err)
+
+	container, err := tcpostgres.Run(ctx, image,
+		tcpostgres.WithDatabase(pgUpstreamDB),
+		tcpostgres.WithUsername(pgUpstreamUser),
+		tcpostgres.WithPassword(pgUpstreamPass),
+		tcpostgres.WithInitScripts(initScript),
+		tcpostgres.BasicWaitStrategies(),
+	)
+	if err != nil {
+		t.Skipf("postgres testcontainers unavailable (is Docker running?): %v", err)
+	}
+	testcontainers.CleanupContainer(t, container)
+
+	host, err := container.Host(ctx)
+	require.NoError(t, err)
+	port, err := container.MappedPort(ctx, "5432/tcp")
+	require.NoError(t, err)
+	return host, port.Num()
+}
+
+// TestPostgresNewerGrammarRejected runs against an upstream whose grammar is
+// newer than the proxy's bundled parser. A batch the proxy cannot parse must be
+// rejected rather than forwarded uninspected, so a role change hidden in it
+// never reaches the server.
+func TestPostgresNewerGrammarRejected(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	upstreamHost, upstreamPort := startPostgresContainer(ctx, t, "postgres:18-alpine")
+
+	cfgPath := renderConfig(t, t.TempDir(), "postgres_pipeline.yaml", nil)
+	env := []string{
+		fmt.Sprintf("PG_UPSTREAM_DSN=postgres://%s:%s@%s:%d/%s?sslmode=disable",
+			pgUpstreamUser, pgUpstreamPass, upstreamHost, upstreamPort, pgUpstreamDB),
+		"PG_PROXY_PASSWORD=" + pgClientPassword,
+	}
+	proxy := startProxy(t, proxyBinary(t), cfgPath, env)
+	pgAddr := proxy.AddrFor(t, "postgres proxy starting")
+	host, port, err := net.SplitHostPort(pgAddr)
+	require.NoError(t, err)
+
+	connCtx, connCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer connCancel()
+	conn, err := pgconn.Connect(connCtx, fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
+		pgClientUser, pgClientPassword, host, port, pgUpstreamDB))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+
+	_, err = conn.Exec(connCtx, "SET ROLE "+pgUpstreamUser+"; CREATE TEMP TABLE t (a int, b int GENERATED ALWAYS AS (a) VIRTUAL)").ReadAll()
+	require.Error(t, err)
+	var pgErr *pgconn.PgError
+	require.True(t, errors.As(err, &pgErr), "want PgError, got %T: %v", err, err)
+	require.Contains(t, pgErr.Message, "blocked by iron-proxy policy")
+
+	results, err := conn.Exec(connCtx, "SELECT current_user").ReadAll()
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Rows, 1)
+	require.Equal(t, pgRole, string(results[0].Rows[0][0]))
 }

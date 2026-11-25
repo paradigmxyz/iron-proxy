@@ -61,7 +61,9 @@ Single binary. Single YAML config.
   uses for session setup. The proxy always pins `standard_conforming_strings=on`
   and `client_encoding=UTF8` on the upstream session and rejects client
   attempts to change them, so its SQL parser and the server agree on how
-  statements are tokenized. Pairs with
+  statements are tokenized. Statements the bundled parser (PostgreSQL 17
+  grammar) cannot parse are rejected, so the upstream server's major version
+  must not be newer than PostgreSQL 17. Pairs with
   PostgreSQL row-level security to give per-tenant data isolation when the
   application connects as a shared service-account user. **Requires
   PgBouncer (if used) to run in `pool_mode = session`** — transaction or
