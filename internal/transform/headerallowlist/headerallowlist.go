@@ -103,7 +103,9 @@ func (h *HeaderAllowlist) TransformRequest(_ context.Context, tctx *transform.Tr
 		if h.allowed(name) {
 			continue
 		}
-		req.Header.Del(name)
+		// Delete the exact map key: Header.Del canonicalizes its argument and
+		// would miss keys stored with preserved wire casing (internal/headers).
+		delete(req.Header, name)
 		stripped = append(stripped, name)
 	}
 
