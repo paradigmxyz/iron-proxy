@@ -17,6 +17,11 @@ func TestValidateAWSRegion(t *testing.T) {
 		"mx-central-1",
 		"us-iso-east-1",
 		"us-isob-east-1",
+		"eu-isoe-west-1",
+		"us-isof-south-1",
+		"eusc-de-east-1",
+		"ca-west-1",
+		"cn-northwest-1",
 	}
 	for _, region := range valid {
 		t.Run(region, func(t *testing.T) {
