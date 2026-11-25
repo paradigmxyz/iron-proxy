@@ -61,6 +61,26 @@ func TestHeaderAllowlist_CaseInsensitiveMatch(t *testing.T) {
 	require.Equal(t, []string{"X-Request-Id"}, headerNames(req))
 }
 
+func TestHeaderAllowlist_NonCanonicalMapKeys(t *testing.T) {
+	h, err := newFromConfig(config{Headers: []string{"Accept", "x-keep"}})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	req.Header.Set("Accept", "application/json")
+	// Keys written with preserved wire casing, as internal/headers does.
+	req.Header["x-api-key"] = []string{"secret"}
+	req.Header["X-API-TOKEN"] = []string{"secret"}
+	req.Header["x-keep"] = []string{"1"}
+
+	tctx, _ := runRequest(t, h, req)
+
+	require.Equal(t, []string{"Accept", "x-keep"}, headerNames(req))
+
+	stripped := tctx.DrainAnnotations()["stripped_headers"].([]string)
+	sort.Strings(stripped)
+	require.Equal(t, []string{"X-API-TOKEN", "x-api-key"}, stripped)
+}
+
 func TestHeaderAllowlist_RegexEntry(t *testing.T) {
 	h, err := newFromConfig(config{Headers: []string{"/^X-Trace-.*$/"}})
 	require.NoError(t, err)
