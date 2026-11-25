@@ -5,6 +5,7 @@ package transform
 import (
 	"context"
 	"crypto/x509"
+	"github.com/ironsh/iron-proxy/internal/tenant"
 	"log/slog"
 	"net/http"
 	"time"
@@ -105,11 +106,22 @@ type TunnelInfo struct {
 	// Target is the host:port from the CONNECT request or SOCKS5 target.
 	Target string
 
+	// Tenant is the tenant the tunnel was opened for, in tenancy mode; nil
+	// otherwise.
+	Tenant *Tenant
+
 	// RequestTransforms are the traces from the CONNECT/SOCKS5 request
 	// pipeline, in the order the transforms ran. Inner request transforms and
 	// audit consume this to attribute tunnel-level annotations to the
 	// transform that produced them.
 	RequestTransforms []TransformTrace
+}
+
+// Tenant is a tenant in tenancy mode: its verified token and the pipeline
+// built from the config the control plane returned for it.
+type Tenant struct {
+	Token    *tenant.Token
+	Pipeline *Pipeline
 }
 
 // Annotate attaches audit metadata to the current transform's trace.
@@ -144,6 +156,10 @@ type PipelineResult struct {
 	StatusCode int
 
 	Tunnel *TunnelInfo
+
+	// Tenant is the verified tenant token the request was served for, in
+	// tenancy mode; nil otherwise. Audit renders its subject and ID only.
+	Tenant *tenant.Token
 
 	RequestTransforms  []TransformTrace
 	ResponseTransforms []TransformTrace

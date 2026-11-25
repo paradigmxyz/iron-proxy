@@ -16,6 +16,7 @@ import (
 	"golang.org/x/oauth2/jwt"
 
 	"github.com/ironsh/iron-proxy/internal/headers"
+	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 // mint returns a cached or freshly minted access token for the entry.
@@ -60,7 +61,7 @@ func (e *tokenEntry) tokenSourceFor(ctx context.Context) (oauth2.TokenSource, er
 		return e.tokenSource, nil
 	}
 	tsCtx := ctx
-	if len(headers) > 0 {
+	if transform.OutboundDialer() != nil || len(headers) > 0 {
 		tsCtx = context.WithValue(ctx, oauth2.HTTPClient, newHeaderInjectingClient(headers))
 	}
 	ts, err := buildTokenSource(tsCtx, e.grant, vals, e.scopes, e.cfgEndpoint, e.audience)
@@ -154,9 +155,13 @@ func (t *headerInjectingTransport) RoundTrip(req *http.Request) (*http.Response,
 }
 
 func newHeaderInjectingClient(headers map[string]string) *http.Client {
+	base := http.DefaultTransport
+	if transform.OutboundDialer() != nil {
+		base = transform.NewOutboundTransport()
+	}
 	return &http.Client{Transport: &headerInjectingTransport{
 		headers: headers,
-		base:    http.DefaultTransport,
+		base:    base,
 	}}
 }
 

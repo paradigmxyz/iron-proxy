@@ -5,15 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	"gopkg.in/yaml.v3"
+
+	"github.com/ironsh/iron-proxy/internal/tenant"
+	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 // Source is a prepared secret. Get fetches the current value, possibly
@@ -166,6 +171,46 @@ func (r *fileBuilder) Build(raw yaml.Node) (secretSource, error) {
 	})
 }
 
+// --- tenant_token source ---
+
+// tenantTokenBuilder returns the verified tenant token carried by a request's
+// context. It is only meaningful in tenancy mode; outside it, the source is
+// unavailable. The token differs per request (and per tenant), so this source
+// is deliberately not wrapped in the lazy/TTL cache.
+type tenantTokenBuilder struct{}
+
+type tenantTokenConfig struct {
+	Type    string `yaml:"type"`
+	JSONKey string `yaml:"json_key,omitempty"`
+}
+
+func newTenantTokenBuilder(_ *slog.Logger) *tenantTokenBuilder {
+	return &tenantTokenBuilder{}
+}
+
+func (b *tenantTokenBuilder) Build(raw yaml.Node) (secretSource, error) {
+	var cfg tenantTokenConfig
+	if err := raw.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("parsing tenant_token source config: %w", err)
+	}
+	if cfg.JSONKey != "" {
+		return nil, fmt.Errorf("tenant_token source does not support \"json_key\"")
+	}
+	return &tenantTokenSource{}, nil
+}
+
+type tenantTokenSource struct{}
+
+func (s *tenantTokenSource) Name() string { return "tenant_token" }
+
+func (s *tenantTokenSource) Get(ctx context.Context) (string, error) {
+	tok, ok := tenant.FromContext(ctx)
+	if !ok {
+		return "", fmt.Errorf("tenant_token source requires a tenant token in the request context")
+	}
+	return tok.Raw, nil
+}
+
 // --- shared AWS client cache ---
 
 // awsClientCache provides region-keyed caching for any AWS service client.
@@ -184,6 +229,14 @@ func (c *awsClientCache[C]) get(ctx context.Context, region string) (C, error) {
 	var opts []func(*awsconfig.LoadOptions) error
 	if region != "" {
 		opts = append(opts, awsconfig.WithRegion(region))
+	}
+	if dial := transform.OutboundDialer(); dial != nil {
+		client := awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+			tr.DialContext = dial
+			// An env proxy would hide the real destination from the guard.
+			tr.Proxy = nil
+		})
+		opts = append(opts, awsconfig.WithHTTPClient(client))
 	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
@@ -231,6 +284,11 @@ func (r *awsSMBuilder) Build(raw yaml.Node) (secretSource, error) {
 	}
 	if cfg.SecretID == "" {
 		return nil, fmt.Errorf("aws_sm source requires \"secret_id\" field")
+	}
+	if cfg.Region != "" {
+		if err := transform.ValidateAWSRegion(cfg.Region); err != nil {
+			return nil, fmt.Errorf("aws_sm source: %w", err)
+		}
 	}
 	return buildLazySource(cfg.SecretID, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchSecret(ctx, cfg)
@@ -296,6 +354,11 @@ func (r *awsSSMBuilder) Build(raw yaml.Node) (secretSource, error) {
 	}
 	if cfg.Name == "" {
 		return nil, fmt.Errorf("aws_ssm source requires \"name\" field")
+	}
+	if cfg.Region != "" {
+		if err := transform.ValidateAWSRegion(cfg.Region); err != nil {
+			return nil, fmt.Errorf("aws_ssm source: %w", err)
+		}
 	}
 	return buildLazySource(cfg.Name, cfg.TTL, cfg.FailureTTL, r.logger, func(ctx context.Context) (string, error) {
 		return r.fetchParameter(ctx, cfg)

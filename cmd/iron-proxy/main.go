@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -30,7 +31,9 @@ import (
 	"github.com/ironsh/iron-proxy/internal/proxy"
 	"github.com/ironsh/iron-proxy/internal/responseretry"
 	"github.com/ironsh/iron-proxy/internal/sshproxy"
+	"github.com/ironsh/iron-proxy/internal/tenancy"
 	"github.com/ironsh/iron-proxy/internal/transform"
+	"github.com/ironsh/iron-proxy/internal/transform/secrets"
 	"github.com/ironsh/iron-proxy/internal/version"
 
 	// Register built-in transforms.
@@ -148,6 +151,18 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+	// Tenancy serves many tenants from per-token configs; managed mode binds
+	// the whole proxy to one control-plane principal. They cannot combine.
+	if cfg.Tenancy.Enabled && managed {
+		fmt.Fprintln(os.Stderr, "error: tenancy cannot be combined with managed mode (IRON_PROXY_TOKEN)")
+		os.Exit(1)
+	}
+	// The Postgres and SSH listeners have no tenant binding: in a shared
+	// proxy they would serve every tenant with the proxy's own config.
+	if cfg.Tenancy.Enabled && (cfg.Postgres.Kind != 0 || cfg.SSH.Kind != 0 || *requireSSH) {
+		fmt.Fprintln(os.Stderr, "error: tenancy cannot be combined with the postgres or ssh listeners")
+		os.Exit(1)
+	}
 
 	// Set up audit function.
 	auditFunc := transform.AuditFunc(transform.NewAuditLogger(logger))
@@ -163,6 +178,16 @@ func main() {
 		logger.Info("OTEL audit export enabled")
 	}
 	holder.Load().SetAuditFunc(auditFunc)
+
+	var tenancyCache *tenancy.Cache
+	if cfg.Tenancy.Enabled {
+		tenancyCache, err = initTenancy(cfg, bodyLimits, auditFunc, logger)
+		if err != nil {
+			logger.Error("initializing tenancy", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.Info("tenancy mode enabled", slog.String("config_url", cfg.Tenancy.Config.URL))
+	}
 
 	// Initialize cert cache. Not needed in sni-only mode since TLS is never
 	// terminated and no leaf certs are generated.
@@ -215,6 +240,19 @@ func main() {
 			slog.Any("cidrs", cfg.Proxy.UpstreamDenyCIDRs.Values),
 		)
 	}
+	// In tenancy mode, tenant configs choose token endpoints and secret
+	// backends, so transforms' own outbound calls must pass the same deny
+	// list as upstream requests. Tenant pipelines are built lazily, after
+	// this. Other modes keep their direct dialers (instance metadata
+	// credentials would otherwise be blocked by the default deny list).
+	if tenancyCache != nil {
+		transform.SetOutboundDialer((&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+			Resolver:  resolver,
+			Control:   guard.DialControl,
+		}).DialContext)
+	}
 
 	sshServer, sshListener, err := sshproxy.LoadFromNode(ctx, cfg.SSH, guard, auditFunc, logger)
 	if err == nil && *requireSSH && sshServer == nil {
@@ -265,7 +303,8 @@ func main() {
 		// Managed proxies fail closed until the first control-plane config
 		// has been applied; an un-synced pipeline would otherwise pass
 		// requests through with placeholder credentials intact.
-		Ready: managedReady(poller),
+		Ready:   managedReady(poller),
+		Tenancy: tenancyCache,
 	})
 
 	// Initialize metrics server.
@@ -496,6 +535,50 @@ func initManaged(ctx context.Context, cfg *config.Config, bodyLimits transform.B
 	}()
 
 	return holder, mcpHolder, gatewayHolder, ingestToken, pgListener, poller
+}
+
+// initTenancy builds the tenant cache. A tenant's pipeline is the YAML
+// transforms (applied to every tenant) followed by the tenant's own config,
+// with the secret sources tenancy forbids stripped out first.
+func initTenancy(cfg *config.Config, bodyLimits transform.BodyLimits, auditFunc transform.AuditFunc, logger *slog.Logger) (*tenancy.Cache, error) {
+	keys, err := tenancy.ParsePublicKeys(os.Getenv(tenancy.PublicKeysEnv))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", tenancy.PublicKeysEnv, err)
+	}
+	controlPlaneToken := os.Getenv(tenancy.ControlPlaneTokenEnv)
+	if controlPlaneToken == "" {
+		return nil, fmt.Errorf("%s is required", tenancy.ControlPlaneTokenEnv)
+	}
+	build := func(rules, secretsRaw, transformsRaw json.RawMessage) (*transform.Pipeline, error) {
+		secretsRaw, transformsRaw, dropped, err := secrets.RestrictTenantSources(secretsRaw, transformsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("restricting tenant sources: %w", err)
+		}
+		for _, reason := range dropped {
+			logger.Warn("dropped tenant credential", slog.String("reason", reason))
+		}
+		tenantTransforms, err := config.TransformsFromSync(rules, secretsRaw, transformsRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parsing tenant config: %w", err)
+		}
+		all := append(append([]config.Transform(nil), cfg.Transforms...), tenantTransforms...)
+		pipeline, err := buildPipeline(all, bodyLimits, logger)
+		if err != nil {
+			return nil, err
+		}
+		pipeline.SetAuditFunc(auditFunc)
+		return pipeline, nil
+	}
+	return tenancy.New(tenancy.Options{
+		Verifier:          tenancy.NewVerifier(keys, cfg.Tenancy.Token.Issuer, cfg.Tenancy.Token.Audience),
+		URL:               cfg.Tenancy.Config.URL,
+		ControlPlaneToken: controlPlaneToken,
+		HTTPClient:        &http.Client{Timeout: 10 * time.Second},
+		FreshFor:          time.Duration(cfg.Tenancy.Config.FreshFor),
+		StaleFor:          time.Duration(cfg.Tenancy.Config.StaleFor),
+		Build:             build,
+		Logger:            logger,
+	}), nil
 }
 
 // managedReady gates the proxy on the first applied control-plane config.

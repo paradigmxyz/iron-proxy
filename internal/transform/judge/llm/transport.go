@@ -3,10 +3,11 @@ package llm
 import (
 	"crypto/tls"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/ironsh/iron-proxy/internal/transform"
 )
 
 const defaultMaxTokens = 256
@@ -15,10 +16,7 @@ const defaultMaxTokens = 256
 // LLM endpoint can't hold a goroutine past the per-call context timeout.
 func buildTransport() *http.Transport {
 	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           transform.DialOutbound,
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,

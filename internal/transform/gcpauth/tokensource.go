@@ -58,6 +58,7 @@ func buildWorkloadIdentity(ctx context.Context, node yaml.Node, scopes []string,
 	if err := node.Decode(&cfg); err != nil {
 		return nil, "", fmt.Errorf("parsing workload_identity provider: %w", err)
 	}
+	ctx = withOutboundHTTPClient(ctx)
 	creds, err := google.FindDefaultCredentials(ctx, scopes...)
 	if err != nil {
 		return nil, "", fmt.Errorf("loading GCP default credentials: %w", err)

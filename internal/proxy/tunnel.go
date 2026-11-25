@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/ironsh/iron-proxy/internal/tenancy"
+	"github.com/ironsh/iron-proxy/internal/tenant"
 	"io"
 	"log/slog"
 	"maps"
@@ -60,6 +62,17 @@ func (p *Proxy) handleTunnel(conn net.Conn) {
 
 	// SOCKS5 starts with version byte 0x05
 	if first[0] == 0x05 {
+		// SOCKS5 has no place for a bearer token: refuse it in tenancy
+		// mode before anything else, with "no acceptable methods".
+		if p.tenancy != nil {
+			p.auditTenancyRejection(conn.RemoteAddr().String(), "", "SOCKS5", "", tenancySOCKS5)
+			_, err := conn.Write([]byte{0x05, 0xFF})
+			if err != nil {
+				p.logger.Debug("tunnel socks5 refusal error", slog.String("error", err.Error()))
+			}
+			_ = conn.Close() // refused; a close error changes nothing
+			return
+		}
 		if err := p.handleSOCKS5(conn, br); err != nil {
 			p.logger.Debug("tunnel socks5 error", slog.String("error", err.Error()))
 		}
@@ -86,6 +99,18 @@ func (p *Proxy) serveTunnelProxyHTTP(conn net.Conn) error {
 			http.Error(w, "unsupported proxy request scheme", http.StatusBadRequest)
 			return
 		}
+		if p.tenancy != nil {
+			// Absolute-form requests authenticate one by one.
+			tnt, rej := p.tenancy.Bind(r.Context(), r.Header.Get("Proxy-Authorization"))
+			if rej != nil {
+				p.auditTenancyRejection(r.RemoteAddr, r.Host, r.Method, r.URL.Path, rej)
+				writeTenancyRejection(w, rej)
+				return
+			}
+			r.Header.Del("Proxy-Authorization")
+			p.handleHTTP(w, r, nil, tnt)
+			return
+		}
 		p.handleDirectHTTP(w, r)
 	}))
 }
@@ -99,7 +124,23 @@ func (p *Proxy) handleTunnelCONNECT(w http.ResponseWriter, req *http.Request) {
 
 	p.logger.Debug("tunnel CONNECT", slog.String("target", host))
 
-	ok, rejectResp, tunnelInfo := p.tunnelTransformCheck(req.RemoteAddr, host, req.Header)
+	var tnt *transform.Tenant
+	if p.tenancy != nil {
+		var rej *tenancy.Rejection
+		tnt, rej = p.tenancy.Bind(req.Context(), req.Header.Get("Proxy-Authorization"))
+		if rej != nil {
+			p.auditTenancyRejection(req.RemoteAddr, host, http.MethodConnect, "", rej)
+			w.Header().Set("Connection", "close")
+			writeTenancyRejection(w, rej)
+			return
+		}
+	}
+
+	connectHeaders := req.Header
+	if tnt != nil {
+		connectHeaders = withoutProxyAuthorization(connectHeaders)
+	}
+	ok, rejectResp, tunnelInfo := p.tunnelTransformCheck(req.RemoteAddr, host, connectHeaders, tnt)
 	if !ok {
 		w.Header().Set("Connection", "close")
 		if rejectResp == nil {
@@ -234,7 +275,7 @@ func (p *Proxy) handleSOCKS5(conn net.Conn, br *bufio.Reader) error {
 
 	p.logger.Debug("tunnel SOCKS5 CONNECT", slog.String("target", target))
 
-	ok, _, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil)
+	ok, _, tunnelInfo := p.tunnelTransformCheck(conn.RemoteAddr().String(), target, nil, nil)
 	if !ok {
 		if err := p.socks5Reply(conn, 0x02); err != nil {
 			return fmt.Errorf("write connection-not-allowed: %w", err)
@@ -263,7 +304,7 @@ func (p *Proxy) socks5Reply(conn net.Conn, status byte) error {
 // is non-nil the headers from the original CONNECT request (e.g.
 // Proxy-Authorization) are forwarded to transforms so they can make
 // authentication and policy decisions at the tunnel level.
-func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header) (bool, *http.Response, *transform.TunnelInfo) {
+func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders http.Header, tnt *transform.Tenant) (bool, *http.Response, *transform.TunnelInfo) {
 	host, _, _ := net.SplitHostPort(target)
 
 	hdr := http.Header{}
@@ -302,12 +343,15 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 		SNI:        host,
 		Mode:       mode,
 	}
-	pl, finish := p.beginPipelineRun(result)
+	pl, finish := p.beginPipelineRun(result, tnt)
 	defer finish()
 
 	if !p.isReady() {
 		markNotReady(result)
 		return false, notReadyResponse(), nil
+	}
+	if tnt != nil {
+		req = req.WithContext(tenant.WithToken(req.Context(), tnt.Token))
 	}
 
 	rejectResp, err := pl.ProcessRequest(req.Context(), tctx, req, &result.RequestTransforms)
@@ -335,6 +379,7 @@ func (p *Proxy) tunnelTransformCheck(remoteAddr, target string, connectHeaders h
 	result.StatusCode = http.StatusOK
 	return true, nil, &transform.TunnelInfo{
 		Target:            target,
+		Tenant:            tnt,
 		RequestTransforms: result.RequestTransforms,
 	}
 }
@@ -389,7 +434,7 @@ func (p *Proxy) serveTunnelTLS(clientConn net.Conn, target string, tunnelInfo *t
 	}
 
 	return serveOneHTTPConn(tlsConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p.handleHTTP(w, r, tunnelInfo)
+		p.handleHTTP(w, r, tunnelInfo, tunnelTenant(tunnelInfo))
 	}))
 }
 
@@ -398,7 +443,7 @@ func (p *Proxy) serveTunnelHTTP(clientConn net.Conn, target string, tunnelInfo *
 	defer clientConn.Close()
 
 	return serveOneHTTPConn(clientConn, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p.handleHTTP(w, r, tunnelInfo)
+		p.handleHTTP(w, r, tunnelInfo, tunnelTenant(tunnelInfo))
 	}))
 }
 
@@ -450,8 +495,17 @@ func cloneTunnelInfo(info *transform.TunnelInfo) *transform.TunnelInfo {
 	}
 	return &transform.TunnelInfo{
 		Target:            info.Target,
+		Tenant:            info.Tenant,
 		RequestTransforms: traces,
 	}
+}
+
+// tunnelTenant is the tenant a tunnel was opened for, if any.
+func tunnelTenant(info *transform.TunnelInfo) *transform.Tenant {
+	if info == nil {
+		return nil
+	}
+	return info.Tenant
 }
 
 // isHTTPMethodByte returns true if b could be the first byte of an HTTP method.

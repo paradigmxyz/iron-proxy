@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"time"
 
@@ -63,6 +64,7 @@ type Config struct {
 	Metrics      Metrics      `yaml:"metrics"`
 	Management   Management   `yaml:"management"`
 	ControlPlane ControlPlane `yaml:"control_plane"`
+	Tenancy      Tenancy      `yaml:"tenancy"`
 	Log          Log          `yaml:"log"`
 }
 
@@ -183,6 +185,42 @@ type ControlPlane struct {
 	PollInterval Duration `yaml:"poll_interval"`
 }
 
+// Tenancy configures tenancy mode: one proxy serving many tenants, each
+// identified per tunnel by an Ed25519 tenant token in Proxy-Authorization and
+// served the config the control plane returns for that token. The public keys
+// tokens are verified with come from the IRON_TENANT_PUBLIC_KEYS environment
+// variable (one or more PEM blocks), never from the config file.
+type Tenancy struct {
+	Enabled bool          `yaml:"enabled"`
+	Token   TenancyToken  `yaml:"token"`
+	Config  TenancyConfig `yaml:"config"`
+}
+
+// TenancyToken is what a tenant token must claim.
+type TenancyToken struct {
+	Issuer   string `yaml:"issuer"`
+	Audience string `yaml:"audience"`
+}
+
+// TenancyConfig is where and how often tenant configs are fetched.
+type TenancyConfig struct {
+	// URL is the control-plane endpoint that returns a tenant's config for
+	// the tenant token it is called with.
+	URL string `yaml:"url"`
+	// FreshFor is how long a fetched config is used before it is refreshed.
+	FreshFor Duration `yaml:"fresh_for"`
+	// StaleFor is how long the last good config keeps serving while the
+	// control plane is failing.
+	StaleFor Duration `yaml:"stale_for"`
+}
+
+const (
+	// DefaultTenancyFreshFor is the default tenancy.config.fresh_for.
+	DefaultTenancyFreshFor = 60 * time.Second
+	// DefaultTenancyStaleFor is the default tenancy.config.stale_for.
+	DefaultTenancyStaleFor = 10 * time.Minute
+)
+
 // Log configures structured logging.
 type Log struct {
 	Level string `yaml:"level"`
@@ -277,6 +315,12 @@ func applyDefaults(cfg *Config) {
 	if cfg.ControlPlane.PollInterval == 0 {
 		cfg.ControlPlane.PollInterval = Duration(DefaultControlPlanePollInterval)
 	}
+	if cfg.Tenancy.Config.FreshFor == 0 {
+		cfg.Tenancy.Config.FreshFor = Duration(DefaultTenancyFreshFor)
+	}
+	if cfg.Tenancy.Config.StaleFor == 0 {
+		cfg.Tenancy.Config.StaleFor = Duration(DefaultTenancyStaleFor)
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
@@ -313,6 +357,10 @@ func Validate(cfg *Config) error {
 		return fmt.Errorf("control_plane.poll_interval must be positive; got %s", time.Duration(cfg.ControlPlane.PollInterval))
 	}
 
+	if err := validateTenancy(cfg); err != nil {
+		return err
+	}
+
 	if err := dnsguard.ValidateCIDRs(cfg.Proxy.UpstreamDenyCIDRs.Values); err != nil {
 		return fmt.Errorf("proxy.upstream_deny_cidrs: %w", err)
 	}
@@ -339,5 +387,36 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	return nil
+}
+
+// validateTenancy checks the tenancy block. Tenancy needs the tunnel
+// listener (tenants authenticate per CONNECT) and MITM TLS (tenant
+// credentials are applied to the requests inside a tunnel).
+func validateTenancy(cfg *Config) error {
+	t := cfg.Tenancy
+	if !t.Enabled {
+		return nil
+	}
+	switch {
+	case t.Token.Issuer == "":
+		return fmt.Errorf("tenancy.token.issuer is required")
+	case t.Token.Audience == "":
+		return fmt.Errorf("tenancy.token.audience is required")
+	case t.Config.URL == "":
+		return fmt.Errorf("tenancy.config.url is required")
+	case cfg.Proxy.TunnelListen == "":
+		return fmt.Errorf("tenancy requires proxy.tunnel_listen")
+	case cfg.TLS.Mode != TLSModeMITM:
+		return fmt.Errorf("tenancy requires tls.mode %q", TLSModeMITM)
+	case t.Config.FreshFor <= 0:
+		return fmt.Errorf("tenancy.config.fresh_for must be positive")
+	case t.Config.StaleFor < t.Config.FreshFor:
+		return fmt.Errorf("tenancy.config.stale_for must be at least fresh_for")
+	}
+	u, err := url.Parse(t.Config.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("tenancy.config.url must be an http(s) URL")
+	}
 	return nil
 }

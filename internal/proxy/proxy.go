@@ -11,6 +11,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/ironsh/iron-proxy/internal/tenancy"
+	"github.com/ironsh/iron-proxy/internal/tenant"
 	"io"
 	"log/slog"
 	"net"
@@ -52,6 +54,9 @@ type Proxy struct {
 	mcpGateway           *mcpgateway.Holder
 	responseRetryHandler *responseretry.Handler
 	logger               *slog.Logger
+	// tenancy is set in tenancy mode: every request must belong to a tenant
+	// bound by its tunnel's tenant token.
+	tenancy *tenancy.Cache
 
 	// shutdownCtx is canceled by Shutdown to unblock in-flight TCP-passthrough
 	// connections that would otherwise sit on blocking Reads.
@@ -91,6 +96,10 @@ type Options struct {
 	// an upstream SOCKS5/HTTP CONNECT proxy (see http.Transport.Proxy). nil
 	// means connect directly. Use config.UpstreamProxy.ProxyFunc to build one.
 	UpstreamProxy func(*http.Request) (*url.URL, error)
+	// Tenancy, when non-nil, enables tenancy mode: each CONNECT must carry a
+	// tenant token, and the tunnel's requests run through that tenant's
+	// pipeline instead of Pipeline. Requests without a tenant are refused.
+	Tenancy *tenancy.Cache
 	// Ready, when non-nil, gates request handling: while it returns false
 	// every proxied request is rejected with 503. Managed proxies use it to
 	// fail closed until the first control-plane config has been applied, so
@@ -125,6 +134,7 @@ func New(opts Options) *Proxy {
 		mcpGateway:           opts.MCPGateway,
 		responseRetryHandler: opts.ResponseRetryHandler,
 		logger:               opts.Logger,
+		tenancy:              opts.Tenancy,
 		shutdownCtx:          shutdownCtx,
 		shutdownCancel:       shutdownCancel,
 	}
@@ -260,12 +270,17 @@ func (p *Proxy) getCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, er
 	return p.certCache.GetOrCreate(hello.ServerName)
 }
 
-// beginPipelineRun snapshots the current pipeline and returns a finish
-// function that computes Duration and emits the audit record. The caller is
-// responsible for populating result.Action, StatusCode, traces, and Err
-// before finish runs — typically via defer. StartedAt is set here.
-func (p *Proxy) beginPipelineRun(result *transform.PipelineResult) (*transform.Pipeline, func()) {
+// beginPipelineRun snapshots the pipeline to run (the tenant's in tenancy
+// mode, else the current one) and returns a finish function that computes
+// Duration and emits the audit record. The caller is responsible for
+// populating result.Action, StatusCode, traces, and Err before finish runs —
+// typically via defer. StartedAt is set here.
+func (p *Proxy) beginPipelineRun(result *transform.PipelineResult, tnt *transform.Tenant) (*transform.Pipeline, func()) {
 	pl := p.pipeline.Load()
+	if tnt != nil {
+		pl = tnt.Pipeline
+		result.Tenant = tnt.Token
+	}
 	result.StartedAt = time.Now()
 	return pl, func() {
 		result.Duration = time.Since(result.StartedAt)
@@ -346,12 +361,13 @@ func markInvalidRequest(result *transform.PipelineResult, reason string) {
 }
 
 func (p *Proxy) handleDirectHTTP(w http.ResponseWriter, r *http.Request) {
-	p.handleHTTP(w, r, nil)
+	p.handleHTTP(w, r, nil, nil)
 }
 
 // handleHTTP is the core HTTP request handler. tunnelInfo is non-nil only
-// when r originated inside a CONNECT/SOCKS5 tunnel.
-func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *transform.TunnelInfo) {
+// when r originated inside a CONNECT/SOCKS5 tunnel. tnt is the tenant the
+// request belongs to in tenancy mode.
+func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *transform.TunnelInfo, tnt *transform.Tenant) {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -379,13 +395,41 @@ func (p *Proxy) handleHTTP(w http.ResponseWriter, r *http.Request, tunnelInfo *t
 		Mode:       transform.ModeMITM,
 		Tunnel:     tctx.Tunnel,
 	}
-	pl, finish := p.beginPipelineRun(result)
+	// In tenancy mode every request must belong to a tenant, and each
+	// request inside a tunnel resolves its tenant again: refreshed configs,
+	// control-plane refusals, invalidations and expiry take effect on the
+	// tunnel's next request.
+	var tenancyRej *tenancy.Rejection
+	var tenantToken *tenant.Token
+	if p.tenancy != nil {
+		if tnt == nil {
+			tenancyRej = tenancyMissing
+		} else {
+			tenantToken = tnt.Token
+			current, rej := p.tenancy.Resolve(r.Context(), tnt.Token)
+			tnt, tenancyRej = current, rej
+		}
+	}
+
+	pl, finish := p.beginPipelineRun(result, tnt)
 	defer finish()
+	if result.Tenant == nil {
+		result.Tenant = tenantToken
+	}
 
 	if reason, msg := p.validateRequest(r); reason != "" {
 		markInvalidRequest(result, reason)
 		http.Error(w, msg, http.StatusBadRequest)
 		return
+	}
+
+	if tenancyRej != nil {
+		markTenancyReject(result, tenancyRej)
+		writeTenancyRejection(w, tenancyRej)
+		return
+	}
+	if tnt != nil {
+		r = r.WithContext(tenant.WithToken(r.Context(), tnt.Token))
 	}
 
 	if !p.isReady() {

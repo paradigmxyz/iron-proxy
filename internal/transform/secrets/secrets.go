@@ -151,6 +151,7 @@ func defaultRegistry(logger *slog.Logger) sourceBuilderRegistry {
 		"vault_kv":          newVaultKVBuilder(logger),
 		"1password":         newOPBuilder(logger),
 		"1password_connect": newOPConnectBuilder(logger),
+		"tenant_token":      newTenantTokenBuilder(logger),
 	}
 }
 
