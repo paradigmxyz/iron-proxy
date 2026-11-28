@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -35,7 +36,10 @@ type grpcConfig struct {
 	SendRequestBody  bool                   `yaml:"send_request_body"`
 	SendResponseBody bool                   `yaml:"send_response_body"`
 	Rules            []hostmatch.RuleConfig `yaml:"rules"`
+	Timeout          time.Duration          `yaml:"timeout"` // per-RPC deadline (default 15s)
 }
+
+const defaultTimeout = 15 * time.Second
 
 type tlsConfig struct {
 	Enabled bool   `yaml:"enabled"` // enable TLS (default false, meaning plaintext)
@@ -52,6 +56,7 @@ type GRPCTransform struct {
 	rules            []hostmatch.Rule
 	conn             *grpc.ClientConn
 	client           transformv1.TransformServiceClient
+	timeout          time.Duration
 }
 
 func factory(cfg yaml.Node, _ *slog.Logger) (transform.Transformer, error) {
@@ -118,6 +123,11 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 		return nil, fmt.Errorf("grpc transform %q: %w", cfg.Name, err)
 	}
 
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
+
 	return &GRPCTransform{
 		name:             cfg.Name,
 		sendRequestBody:  cfg.SendRequestBody,
@@ -125,6 +135,7 @@ func newGRPCTransform(cfg grpcConfig) (*GRPCTransform, error) {
 		rules:            rules,
 		conn:             conn,
 		client:           transformv1.NewTransformServiceClient(conn),
+		timeout:          timeout,
 	}, nil
 }
 
@@ -158,7 +169,9 @@ func (g *GRPCTransform) TransformRequest(ctx context.Context, tctx *transform.Tr
 		return nil, fmt.Errorf("grpc transform %q: marshaling request: %w", g.name, err)
 	}
 
-	resp, err := g.client.TransformRequest(ctx, &transformv1.TransformRequestRequest{
+	callCtx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+	resp, err := g.client.TransformRequest(callCtx, &transformv1.TransformRequestRequest{
 		Context: transformContextToProto(tctx),
 		Request: pbReq,
 	})
@@ -199,7 +212,9 @@ func (g *GRPCTransform) TransformResponse(ctx context.Context, tctx *transform.T
 		return nil, fmt.Errorf("grpc transform %q: marshaling response: %w", g.name, err)
 	}
 
-	grpcResp, err := g.client.TransformResponse(ctx, &transformv1.TransformResponseRequest{
+	callCtx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+	grpcResp, err := g.client.TransformResponse(callCtx, &transformv1.TransformResponseRequest{
 		Context:  transformContextToProto(tctx),
 		Request:  pbReq,
 		Response: pbResp,
